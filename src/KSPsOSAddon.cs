@@ -28,6 +28,7 @@ namespace KSPSOS
         private string scriptsDirectory;
         private string currentScriptPath;
         private string scriptStorageStatus = "Not saved yet";
+        private string feasibilityReport = "Press CHECK IF POSSIBLE to inspect the active vessel.";
         private int reuseIndex = -1;
         private GUIStyle wrappedLabel;
         private GUIStyle richLabel;
@@ -239,6 +240,8 @@ namespace KSPSOS
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("RUN PROGRAM", GUILayout.Height(30f)))
                 runtime.Run(script);
+            if (GUILayout.Button("CHECK IF POSSIBLE", GUILayout.Height(30f)))
+                feasibilityReport = CheckIfPossible(script);
             if (GUILayout.Button("SAVE SCRIPT", GUILayout.Height(30f)))
                 SaveCurrentScript();
             if (GUILayout.Button("STOP", GUILayout.Height(30f)))
@@ -246,6 +249,7 @@ namespace KSPSOS
             if (GUILayout.Button("CLEAR LOG", GUILayout.Height(30f)))
                 runtime.ClearLog();
             GUILayout.EndHorizontal();
+            GUILayout.Label(feasibilityReport, wrappedLabel);
 
             if (!compactTerminal)
             {
@@ -313,6 +317,50 @@ namespace KSPSOS
                 : Path.GetFileName(currentScriptPath);
             focusProgramEditor = true;
             programEditorActive = true;
+        }
+
+        private string CheckIfPossible(string source)
+        {
+            var errors = new List<string>();
+            List<ScriptCommand> commands = CommandParser.Parse(source, errors);
+            if (errors.Count > 0)
+                return "CHECK FAILED: " + string.Join(" | ", errors.ToArray());
+
+            Vessel active = FlightGlobals.ActiveVessel;
+            if (active == null)
+                return "CHECK FAILED: no active vessel.";
+
+            string report = "CHECK: " + active.vesselName + " | mass " + active.totalMass.ToString("0.00") + "t";
+            if (active.VesselDeltaV == null || active.VesselDeltaV.OperatingStageInfo == null || active.VesselDeltaV.OperatingStageInfo.Count == 0)
+                return report + "\nWARNING: KSP delta-v data is not ready.";
+
+            double totalDv = 0d;
+            float lowestTwr = float.MaxValue;
+            for (int i = 0; i < active.VesselDeltaV.OperatingStageInfo.Count; i++)
+            {
+                DeltaVStageInfo stage = active.VesselDeltaV.OperatingStageInfo[i];
+                totalDv += Math.Max(0d, stage.deltaVActual);
+                lowestTwr = Math.Min(lowestTwr, stage.TWRActual);
+                report += "\nStage " + stage.stage + ": dV " + stage.deltaVActual.ToString("0") + "m/s, TWR " + stage.TWRActual.ToString("0.00") + ", burn " + stage.stageBurnTime.ToString("0.0") + "s";
+            }
+            report += "\nTotal available dV: " + totalDv.ToString("0") + "m/s";
+            if (lowestTwr < 1f)
+                report += "\nWARNING: at least one stage has TWR below 1.0.";
+            if (totalDv < 1000d)
+                report += "\nWARNING: very low total dV for an orbital mission.";
+            for (int i = 0; i < commands.Count; i++)
+            {
+                ScriptCommand command = commands[i];
+                if (command.Kind == CommandKind.GravTurn && !string.IsNullOrEmpty(command.Body) && active.mainBody != null &&
+                    !command.Body.Equals(active.mainBody.bodyName, StringComparison.OrdinalIgnoreCase))
+                    report += "\nWARNING: GRAVTURN body " + command.Body + " does not match current body " + active.mainBody.bodyName + ".";
+                if (command.Kind == CommandKind.Circ && active.orbit == null)
+                    report += "\nWARNING: CIRC requires a usable orbit.";
+                if ((command.Kind == CommandKind.ExecuteNode || command.Kind == CommandKind.Transfer || command.Kind == CommandKind.Hohmann) && active.patchedConicSolver == null)
+                    report += "\nWARNING: maneuver planning is unavailable for this vessel.";
+            }
+            report += "\nCHECK COMPLETE: warnings are advisory; the rocket is not controlled.";
+            return report;
         }
 
         private void HandleProgramKeyboard()

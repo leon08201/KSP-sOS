@@ -752,6 +752,11 @@ namespace KSPSOS
             {
                 command.Body = string.Empty;
             }
+            else if (tokens[index].Equals("AUTO", StringComparison.OrdinalIgnoreCase))
+            {
+                command.Body = string.Empty;
+                index++;
+            }
             else
             {
                 command.Body = tokens[index].ToUpperInvariant();
