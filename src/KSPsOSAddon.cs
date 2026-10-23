@@ -16,6 +16,7 @@ namespace KSPSOS
         private string script = DefaultScript;
         private string terminalInput = string.Empty;
         private bool visible;
+        private bool focusTerminalOnOpen;
         private GUIStyle wrappedLabel;
         private GUIStyle richLabel;
         private GUIStyle errorLabel;
@@ -32,7 +33,10 @@ namespace KSPSOS
         private void Update()
         {
             if (Input.GetKeyDown(KeyCode.F8))
+            {
                 visible = !visible;
+                focusTerminalOnOpen = visible;
+            }
 
             Vessel activeVessel = FlightGlobals.ActiveVessel;
             if (activeVessel != subscribedVessel)
@@ -99,6 +103,11 @@ namespace KSPSOS
             GUI.SetNextControlName("KSPsOSTerminalInput");
             GUILayout.BeginHorizontal();
             terminalInput = GUILayout.TextField(terminalInput, GUILayout.Height(28f));
+            if (focusTerminalOnOpen && Event.current.type == EventType.Repaint)
+            {
+                GUI.FocusControl("KSPsOSTerminalInput");
+                focusTerminalOnOpen = false;
+            }
             bool enterPressed = Event.current.type == EventType.KeyDown &&
                                 (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter) &&
                                 GUI.GetNameOfFocusedControl() == "KSPsOSTerminalInput";
@@ -112,6 +121,7 @@ namespace KSPSOS
 
             GUILayout.Label("Program", GUI.skin.box);
             editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(190f));
+            GUI.SetNextControlName("KSPsOSProgramEditor");
             string previousScript = script;
             string editedScript = GUILayout.TextArea(script, GUILayout.ExpandHeight(true));
             if (!string.Equals(previousScript, editedScript, StringComparison.Ordinal))
