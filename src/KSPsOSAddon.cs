@@ -16,9 +16,15 @@ namespace KSPSOS
         private Vector2 logScroll;
         private string script = DefaultScript;
         private string terminalInput = string.Empty;
+        private int terminalCursor;
         private bool visible;
         private bool focusTerminalOnOpen;
         private bool focusProgramEditor;
+        private bool terminalInputActive;
+        private bool programEditorActive;
+        private int programCursor;
+        private bool terminalControlLockActive;
+        private Rect terminalInputRect;
         private string scriptsDirectory;
         private string currentScriptPath;
         private string scriptStorageStatus = "Not saved yet";
@@ -27,8 +33,11 @@ namespace KSPSOS
         private GUIStyle wrappedLabel;
         private GUIStyle richLabel;
         private GUIStyle errorLabel;
+        private GUIStyle terminalLineStyle;
+        private GUIStyle programEditorStyle;
         private Vessel subscribedVessel;
         private const string EditorIndent = "    ";
+        private const string TerminalControlLockId = "KSPsOSTerminal";
 
         private const string DefaultScript = "# KSP-sOS example\nLAUNCH;\nHOLD PG 10;\nSTAGE;\nHOLD 5;\nCIRC;";
 
@@ -37,6 +46,7 @@ namespace KSPSOS
             runtime.SetVessel(FlightGlobals.ActiveVessel);
             scriptsDirectory = Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "KSPsOS", "PluginData", "Scripts");
             EnsureScriptDirectory();
+            Debug.Log("[KSP-sOS] Flight terminal loaded. Press F8 to open it.");
         }
 
         private void Update()
@@ -45,7 +55,10 @@ namespace KSPSOS
             {
                 visible = !visible;
                 focusTerminalOnOpen = visible;
+                terminalInputActive = visible;
             }
+
+            SetTerminalControlLock(visible && HighLogic.LoadedScene == GameScenes.FLIGHT);
 
             Vessel activeVessel = FlightGlobals.ActiveVessel;
             if (activeVessel != subscribedVessel)
@@ -57,7 +70,15 @@ namespace KSPSOS
                     subscribedVessel.OnFlyByWire += OnFlyByWire;
             }
             runtime.SetVessel(activeVessel);
-            runtime.Tick(Time.deltaTime);
+            try
+            {
+                runtime.Tick(Time.deltaTime);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError("[KSP-sOS] Flight script failed: " + exception);
+                runtime.Stop("Script stopped after an error. Check KSP.log.");
+            }
             if (scriptSaveDueTime >= 0f && Time.time >= scriptSaveDueTime)
             {
                 SaveCurrentScript();
@@ -67,6 +88,7 @@ namespace KSPSOS
 
         private void OnDestroy()
         {
+            SetTerminalControlLock(false);
             if (subscribedVessel != null)
                 subscribedVessel.OnFlyByWire -= OnFlyByWire;
             SaveCurrentScript();
@@ -96,6 +118,31 @@ namespace KSPSOS
             if (!visible || HighLogic.LoadedScene != GameScenes.FLIGHT)
                 return;
 
+            // Input.GetKeyDown may be masked by KSP's flight-control lock.
+            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F8)
+            {
+                visible = false;
+                terminalInputActive = false;
+                SetTerminalControlLock(false);
+                Event.current.Use();
+                return;
+            }
+
+            // Match kOS's behavior: the active terminal owns keyboard/control input
+            // while it is open, then releases it as soon as it is hidden.
+            SetTerminalControlLock(true);
+            GUI.skin = HighLogic.Skin;
+
+            if (Event.current.type == EventType.MouseDown && !windowRect.Contains(Event.current.mousePosition))
+            {
+                terminalInputActive = false;
+                programEditorActive = false;
+            }
+
+            // Process keys before GUI.Window can route them to another IMGUI control.
+            HandleTerminalKeyboardFallback();
+            HandleProgramKeyboard();
+
             if (wrappedLabel == null)
             {
                 wrappedLabel = new GUIStyle(GUI.skin.label);
@@ -104,9 +151,26 @@ namespace KSPSOS
                 richLabel.richText = true;
                 errorLabel = new GUIStyle(richLabel);
                 errorLabel.normal.textColor = new Color(1f, 0.35f, 0.35f);
+                terminalLineStyle = new GUIStyle(GUI.skin.box);
+                terminalLineStyle.wordWrap = false;
+                programEditorStyle = new GUIStyle(GUI.skin.textArea);
+                programEditorStyle.wordWrap = false;
             }
 
             windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, "KSP-sOS Terminal");
+        }
+
+        private void SetTerminalControlLock(bool locked)
+        {
+            if (locked == terminalControlLockActive)
+                return;
+
+            if (locked)
+                InputLockManager.SetControlLock(ControlTypes.All, TerminalControlLockId);
+            else
+                InputLockManager.RemoveControlLock(TerminalControlLockId);
+
+            terminalControlLockActive = locked;
         }
 
         private void DrawWindow(int id)
@@ -115,40 +179,61 @@ namespace KSPSOS
             GUILayout.Label("Type a command below and press ENTER, or edit a program and run it. F8 toggles the terminal.", wrappedLabel);
 
             GUILayout.Label("Terminal input", GUI.skin.box);
-            GUI.SetNextControlName("KSPsOSTerminalInput");
             GUILayout.BeginHorizontal();
-            terminalInput = GUILayout.TextField(terminalInput, GUILayout.Height(28f));
-            if (focusTerminalOnOpen && Event.current.type == EventType.Repaint)
+            terminalCursor = Mathf.Clamp(terminalCursor, 0, terminalInput.Length);
+            string displayedInput = terminalInputActive
+                ? terminalInput.Insert(terminalCursor, "|")
+                : terminalInput;
+            GUILayout.Box("> " + displayedInput, terminalLineStyle, GUILayout.ExpandWidth(true), GUILayout.Height(28f));
+            terminalInputRect = GUILayoutUtility.GetLastRect();
+            if (Event.current.type == EventType.MouseDown)
             {
-                GUI.FocusControl("KSPsOSTerminalInput");
-                focusTerminalOnOpen = false;
+                if (terminalInputRect.Contains(Event.current.mousePosition))
+                {
+                    terminalInputActive = true;
+                    programEditorActive = false;
+                    GUI.FocusControl(string.Empty);
+                }
+                else
+                {
+                    terminalInputActive = false;
+                }
             }
-            bool enterPressed = Event.current.type == EventType.KeyDown &&
-                                (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter) &&
-                                GUI.GetNameOfFocusedControl() == "KSPsOSTerminalInput";
-            if (GUILayout.Button("EXECUTE", GUILayout.Width(90f), GUILayout.Height(28f)) || enterPressed)
+            if (focusTerminalOnOpen)
+            {
+                focusTerminalOnOpen = false;
+                terminalInputActive = true;
+            }
+            if (GUILayout.Button("EXECUTE", GUILayout.Width(90f), GUILayout.Height(28f)))
             {
                 ExecuteTerminalLine();
-                if (enterPressed)
-                    Event.current.Use();
             }
             GUILayout.EndHorizontal();
 
             GUILayout.Label("Program", GUI.skin.box);
             GUILayout.Label("Script file: " + scriptStorageStatus, wrappedLabel);
             editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(190f));
-            GUI.SetNextControlName("KSPsOSProgramEditor");
-            string previousScript = script;
-            string editedScript = GUILayout.TextArea(script, GUILayout.ExpandHeight(true));
-            if (!string.Equals(previousScript, editedScript, StringComparison.Ordinal))
+            if (focusProgramEditor)
             {
-                script = ApplyEditorAutoIndent(previousScript, editedScript);
-                QueueScriptSave();
-            }
-            if (focusProgramEditor && Event.current.type == EventType.Repaint)
-            {
-                GUI.FocusControl("KSPsOSProgramEditor");
                 focusProgramEditor = false;
+                programEditorActive = true;
+                terminalInputActive = false;
+            }
+            programCursor = Mathf.Clamp(programCursor, 0, script.Length);
+            string displayedScript = programEditorActive ? script.Insert(programCursor, "|") : script;
+            GUILayout.Box(displayedScript, programEditorStyle, GUILayout.MinHeight(180f), GUILayout.ExpandWidth(true));
+            Rect programEditorRect = GUILayoutUtility.GetLastRect();
+            if (Event.current.type == EventType.MouseDown)
+            {
+                if (programEditorRect.Contains(Event.current.mousePosition))
+                {
+                    programEditorActive = true;
+                    terminalInputActive = false;
+                    programCursor = script.Length;
+                    GUI.FocusControl(string.Empty);
+                }
+                else
+                    programEditorActive = false;
             }
             GUILayout.EndScrollView();
 
@@ -206,6 +291,226 @@ namespace KSPSOS
 
             runtime.RunInteractiveLine(line);
             terminalInput = string.Empty;
+            terminalCursor = 0;
+        }
+
+        private void HandleTerminalKeyboardFallback()
+        {
+            // kOS processes terminal keys from the IMGUI event stream. Keep this
+            // command line independent of Unity's text-field focus as well.
+            if (!terminalInputActive || Event.current.type != EventType.KeyDown)
+                return;
+
+            if (Event.current.keyCode == KeyCode.V &&
+                (Event.current.control || Event.current.command))
+            {
+                string pasted = GUIUtility.systemCopyBuffer;
+                if (!string.IsNullOrEmpty(pasted))
+                {
+                    pasted = pasted.Replace("\r", " ").Replace("\n", " ");
+                    terminalInput = terminalInput.Insert(terminalCursor, pasted);
+                    terminalCursor += pasted.Length;
+                }
+                Event.current.Use();
+                return;
+            }
+
+            EventModifiers blockedModifiers = EventModifiers.Control | EventModifiers.Command | EventModifiers.Alt;
+            if ((Event.current.modifiers & blockedModifiers) != 0)
+                return;
+
+            if (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
+            {
+                ExecuteTerminalLine();
+                Event.current.Use();
+                return;
+            }
+
+            if (Event.current.keyCode == KeyCode.Backspace)
+            {
+                if (terminalCursor > 0)
+                {
+                    terminalInput = terminalInput.Remove(terminalCursor - 1, 1);
+                    terminalCursor--;
+                }
+                Event.current.Use();
+                return;
+            }
+
+            if (Event.current.keyCode == KeyCode.Delete)
+            {
+                if (terminalCursor < terminalInput.Length)
+                    terminalInput = terminalInput.Remove(terminalCursor, 1);
+                Event.current.Use();
+                return;
+            }
+
+            if (Event.current.keyCode == KeyCode.LeftArrow || Event.current.keyCode == KeyCode.RightArrow ||
+                Event.current.keyCode == KeyCode.Home || Event.current.keyCode == KeyCode.End)
+            {
+                switch (Event.current.keyCode)
+                {
+                    case KeyCode.LeftArrow: terminalCursor = Math.Max(0, terminalCursor - 1); break;
+                    case KeyCode.RightArrow: terminalCursor = Math.Min(terminalInput.Length, terminalCursor + 1); break;
+                    case KeyCode.Home: terminalCursor = 0; break;
+                    case KeyCode.End: terminalCursor = terminalInput.Length; break;
+                }
+                Event.current.Use();
+                return;
+            }
+
+            if (Event.current.keyCode == KeyCode.Escape)
+            {
+                terminalInputActive = false;
+                GUI.FocusControl(string.Empty);
+                Event.current.Use();
+                return;
+            }
+
+            char character = Event.current.character;
+            if (character >= ' ' && character < '\ue000' && character != '\u007f')
+            {
+                terminalInput = terminalInput.Insert(terminalCursor, character.ToString());
+                terminalCursor++;
+                Event.current.Use();
+            }
+        }
+
+        private void HandleProgramKeyboard()
+        {
+            if (!programEditorActive || Event.current.type != EventType.KeyDown)
+                return;
+
+            Event key = Event.current;
+            if (key.keyCode == KeyCode.V && (key.control || key.command))
+            {
+                string pasted = GUIUtility.systemCopyBuffer;
+                if (!string.IsNullOrEmpty(pasted))
+                    InsertProgramText(pasted.Replace("\r\n", "\n").Replace('\r', '\n'));
+                key.Use();
+                return;
+            }
+
+            if (key.control || key.command || key.alt)
+                return;
+
+            switch (key.keyCode)
+            {
+                case KeyCode.Return:
+                case KeyCode.KeypadEnter:
+                    int lineStart = ProgramLineStart();
+                    string precedingLine = script.Substring(lineStart, programCursor - lineStart);
+                    string indentation = LeadingWhitespace(precedingLine);
+                    if (precedingLine.TrimEnd().EndsWith("{", StringComparison.Ordinal))
+                        indentation += EditorIndent;
+                    InsertProgramText("\n" + indentation);
+                    key.Use();
+                    return;
+                case KeyCode.Backspace:
+                    if (programCursor > 0)
+                    {
+                        script = script.Remove(programCursor - 1, 1);
+                        programCursor--;
+                        QueueScriptSave();
+                    }
+                    key.Use();
+                    return;
+                case KeyCode.Delete:
+                    if (programCursor < script.Length)
+                    {
+                        script = script.Remove(programCursor, 1);
+                        QueueScriptSave();
+                    }
+                    key.Use();
+                    return;
+                case KeyCode.LeftArrow:
+                    programCursor = Math.Max(0, programCursor - 1);
+                    key.Use();
+                    return;
+                case KeyCode.RightArrow:
+                    programCursor = Math.Min(script.Length, programCursor + 1);
+                    key.Use();
+                    return;
+                case KeyCode.UpArrow:
+                    MoveProgramCursorVertical(-1);
+                    key.Use();
+                    return;
+                case KeyCode.DownArrow:
+                    MoveProgramCursorVertical(1);
+                    key.Use();
+                    return;
+                case KeyCode.Home:
+                    programCursor = ProgramLineStart();
+                    key.Use();
+                    return;
+                case KeyCode.End:
+                    int lineEnd = script.IndexOf('\n', programCursor);
+                    programCursor = lineEnd < 0 ? script.Length : lineEnd;
+                    key.Use();
+                    return;
+                case KeyCode.Tab:
+                    InsertProgramText(EditorIndent);
+                    key.Use();
+                    return;
+                case KeyCode.Escape:
+                    programEditorActive = false;
+                    key.Use();
+                    return;
+            }
+
+            char character = key.character;
+            if (character >= ' ' && character < '\ue000' && character != '\u007f')
+            {
+                if (character == '}')
+                {
+                    int lineStart = ProgramLineStart();
+                    string beforeCursor = script.Substring(lineStart, programCursor - lineStart);
+                    if (beforeCursor.Trim().Length == 0 && beforeCursor.Length >= EditorIndent.Length)
+                    {
+                        script = script.Remove(programCursor - EditorIndent.Length, EditorIndent.Length);
+                        programCursor -= EditorIndent.Length;
+                    }
+                }
+                InsertProgramText(character.ToString());
+                key.Use();
+            }
+        }
+
+        private void InsertProgramText(string inserted)
+        {
+            script = script.Insert(programCursor, inserted);
+            programCursor += inserted.Length;
+            QueueScriptSave();
+        }
+
+        private int ProgramLineStart()
+        {
+            return programCursor == 0 ? 0 : script.LastIndexOf('\n', programCursor - 1) + 1;
+        }
+
+        private void MoveProgramCursorVertical(int direction)
+        {
+            int currentStart = ProgramLineStart();
+            int column = programCursor - currentStart;
+            if (direction < 0)
+            {
+                if (currentStart == 0)
+                    return;
+                int previousEnd = currentStart - 1;
+                int previousStart = previousEnd == 0 ? 0 : script.LastIndexOf('\n', previousEnd - 1) + 1;
+                programCursor = previousStart + Math.Min(column, previousEnd - previousStart);
+            }
+            else
+            {
+                int currentEnd = script.IndexOf('\n', programCursor);
+                if (currentEnd < 0)
+                    return;
+                int nextStart = currentEnd + 1;
+                int nextEnd = script.IndexOf('\n', nextStart);
+                if (nextEnd < 0)
+                    nextEnd = script.Length;
+                programCursor = nextStart + Math.Min(column, nextEnd - nextStart);
+            }
         }
 
         private void EnsureScriptDirectory()
@@ -291,11 +596,14 @@ namespace KSPSOS
             SaveCurrentScript();
             currentScriptPath = CreateScriptPath();
             script = string.Empty;
+            programCursor = 0;
             reuseIndex = -1;
             scriptStorageStatus = string.IsNullOrEmpty(currentScriptPath)
                 ? "New script (not saved)"
                 : Path.GetFileName(currentScriptPath);
             focusProgramEditor = true;
+            programEditorActive = true;
+            terminalInputActive = false;
             SaveCurrentScript();
         }
 
@@ -323,8 +631,11 @@ namespace KSPSOS
             {
                 currentScriptPath = files[reuseIndex];
                 script = File.ReadAllText(currentScriptPath);
+                programCursor = script.Length;
                 scriptStorageStatus = Path.GetFileName(currentScriptPath);
                 focusProgramEditor = true;
+                programEditorActive = true;
+                terminalInputActive = false;
             }
             catch (Exception exception)
             {
@@ -458,45 +769,6 @@ namespace KSPSOS
         private static string EscapeRichText(string text)
         {
             return text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
-        }
-
-        private static string ApplyEditorAutoIndent(string previous, string edited)
-        {
-            if (string.IsNullOrEmpty(edited) || edited.Length != previous.Length + 1)
-                return edited;
-
-            if (edited.EndsWith("\n", StringComparison.Ordinal))
-            {
-                int newline = edited.Length - 1;
-                int lineStart = 0;
-                if (newline > 0)
-                {
-                    int priorNewline = edited.LastIndexOf('\n', newline - 1);
-                    lineStart = priorNewline < 0 ? 0 : priorNewline + 1;
-                }
-                string completedLine = edited.Substring(lineStart, newline - lineStart);
-                string indentation = LeadingWhitespace(completedLine);
-                if (completedLine.TrimEnd().EndsWith("{", StringComparison.Ordinal))
-                    indentation += EditorIndent;
-                return edited + indentation;
-            }
-
-            if (edited.EndsWith("}", StringComparison.Ordinal))
-            {
-                int lineStart = edited.LastIndexOf('\n');
-                lineStart = lineStart < 0 ? 0 : lineStart + 1;
-                string currentLine = edited.Substring(lineStart);
-                string indentation = LeadingWhitespace(currentLine);
-                if (currentLine.TrimStart().StartsWith("}", StringComparison.Ordinal) && indentation.Length > 0)
-                {
-                    int remove = indentation.EndsWith("\t", StringComparison.Ordinal)
-                        ? 1
-                        : Math.Min(EditorIndent.Length, indentation.Length);
-                    return edited.Substring(0, lineStart) + indentation.Substring(0, indentation.Length - remove) + currentLine.Substring(indentation.Length);
-                }
-            }
-
-            return edited;
         }
 
         private static string LeadingWhitespace(string text)

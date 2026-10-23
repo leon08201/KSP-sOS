@@ -4,3 +4,4 @@ GameData/KSPsOS/Plugins/*.dll
 .DS_Store
 *.user
 *.suo
+/KerbalOS/

@@ -13,7 +13,7 @@
 
 KSP-sOS (simple operating system) is a small, beginner-friendly flight scripting mod for Kerbal Space Program 1.x. Type commands into an in-game terminal, combine them into a program, and let the vessel execute them in sequence.
 
-It is inspired by kOS/KerbOS, but the language is intentionally compact and readable:
+The language is intentionally compact and readable:
 
 ```text
 LAUNCH;
@@ -70,9 +70,11 @@ PRINT hello from KSP-sOS;
 
 Interactive commands run only when another program is not already running. Press **STOP** first if the terminal reports that it is busy.
 
+When the terminal is open, it takes keyboard/control focus from the flight scene. The command line reads keys directly; you can type as soon as the window opens or click the line to make it active. Left/Right, Home/End, Backspace/Delete, and paste with Ctrl+V or Command+V are supported.
+
 ### Program
 
-Type or paste a complete multi-line flight program here. Press **RUN PROGRAM** to run it from the first line.
+Click the program area, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line. The editor reads keys directly, supports cursor movement and deletion, and saves edits automatically.
 
 ```text
 LAUNCH;
@@ -124,7 +126,7 @@ LAUNCH;
 
 Indentation is optional. It is only used to make blocks easier to read.
 
-The in-game program editor adds four spaces automatically when you press Enter after an opening `{`, and removes one indentation level when you type a closing `}` at the end of the current line. This is editor convenience only; the parser does not require indentation.
+The in-game program editor adds four spaces automatically when you press Enter after an opening `{`, and removes one indentation level when you type a closing `}` on an indented empty line. This is editor convenience only; the parser does not require indentation.
 
 Control-flow blocks also support C#-style curly braces. Braces are optional for the older `END;` form, but recommended for new scripts:
 
@@ -632,7 +634,7 @@ The current KSP-sOS version supports:
 - Opt-in active-stage safety aborts through `using safeabort;`.
 - Stock-experiment execution, collection, and optional antenna transmission through `SCIENCE AUTO;` with `using maxscience;`.
 - Safe-orbit telemetry conditions and stock solar-panel deployment through `ORBIT = SAFE` and `DEPLOY SOLAR PANELS;`.
-- Body-specific adaptive gravity turns through `GRAVTURN <body>;`.
+- Body-specific gravity-turn presets through `GRAVTURN <body>;`.
 - Equatorial-by-default ascent and opt-in polar ascent/arrival through `GRAVTURN POLAR <body>;` and `POLAR ORBIT AROUND <body>;`.
 - Approximate local and interplanetary transfer-node planning through `HOHMANN TO <body>;` and `TRANSFER TO <body>;`.
 - Long-mission transfer continuation: after an executed transfer, `LAND ON <body>;` waits for destination sphere-of-influence entry before starting descent guidance.
@@ -645,6 +647,8 @@ The current KSP-sOS version supports:
 
 Transfer nodes remain approximate. `EXECUTE NODE;` can commit the next node, but verify phase angle, inclination, node direction, and available delta-v in map view before committing to a long interplanetary burn.
 
+The scripting engine is still an early alpha. A successful build and parser test do not establish that every flight controller can complete a full mission in KSP. In particular, long-range rendezvous, transfer targeting, docking, and powered landing need in-game flight validation and further guidance work before they can be relied on unattended.
+
 ## Troubleshooting
 
 ### The terminal does not appear
@@ -653,6 +657,13 @@ Transfer nodes remain approximate. `EXECUTE NODE;` can commit the next node, but
 - Enter an actual flight scene, not the editor or space center.
 - Press **F8**.
 - Check `KSP.log` for plugin-loading errors.
+
+### I cannot type in the terminal
+
+- Click inside the **Terminal input** line, then type `PRINT hello;` and press Enter. The typed characters should appear beside `>`.
+- Make sure the terminal is open with **F8** and that the game is paused only if your KSP setup still delivers GUI input while paused.
+- If the line still does not receive keys, press **F8** to close and reopen the terminal, then click the line again.
+- Check `KSP.log` for `[KSP-sOS] Flight terminal loaded`. If it is absent, the DLL is not loading; if an error follows it, include the error when reporting the issue.
 
 ### A command reports an error
 
