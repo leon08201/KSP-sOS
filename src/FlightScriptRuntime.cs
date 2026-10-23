@@ -12,11 +12,24 @@ namespace KSPSOS
             Holding,
             WaitingForApoapsis,
             Circularizing,
-            WaitingForCondition
+            WaitingForCondition,
+            GravityTurning
+        }
+
+        private sealed class GravityTurnProfile
+        {
+            public string Body;
+            public double TurnStartAltitude;
+            public double TurnEndAltitude;
+            public double InitialPitchSeconds;
+            public float InitialPitchInput;
+            public double ProgradeSpeed;
+            public double TargetApoapsis;
         }
 
         private readonly List<string> log = new List<string>();
         private readonly Dictionary<string, bool> flags = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private List<ScriptCommand> commands = new List<ScriptCommand>();
         private int commandIndex;
         private float holdRemaining;
@@ -24,8 +37,15 @@ namespace KSPSOS
         private Vessel vessel;
         private bool circularBurnStarted;
         private float throttle;
+        private float lastAutoStageTime = -100f;
+        private GravityTurnProfile gravityTurnProfile;
+        private double gravityTurnElapsed;
+        private bool gravityTurnPrograde;
+        private float pitchInput;
 
         public float Throttle { get { return throttle; } }
+        public float PitchInput { get { return pitchInput; } }
+        public bool IsControllingAttitude { get { return state == RuntimeState.GravityTurning; } }
         public bool IsRunning { get { return state != RuntimeState.Idle || commandIndex < commands.Count; } }
         public bool IsControllingThrottle { get; private set; }
         public string Status { get; private set; }
@@ -35,6 +55,7 @@ namespace KSPSOS
         {
             Status = "Ready. Press RUN to execute the script.";
             throttle = 0f;
+            pitchInput = 0f;
             IsControllingThrottle = false;
         }
 
@@ -46,6 +67,8 @@ namespace KSPSOS
         public void Run(string script)
         {
             Stop("Stopped.");
+            modules.Clear();
+            flags.Clear();
             var errors = new List<string>();
             commands = CommandParser.Parse(script, errors);
             if (errors.Count > 0)
@@ -65,6 +88,10 @@ namespace KSPSOS
             commandIndex = 0;
             state = RuntimeState.Idle;
             circularBurnStarted = false;
+            gravityTurnProfile = null;
+            gravityTurnElapsed = 0d;
+            gravityTurnPrograde = false;
+            pitchInput = 0f;
             IsControllingThrottle = true;
             Status = "Running...";
             AddLog("Started " + commands.Count + " command(s).");
@@ -89,6 +116,9 @@ namespace KSPSOS
             holdRemaining = 0f;
             circularBurnStarted = false;
             throttle = 0f;
+            pitchInput = 0f;
+            gravityTurnProfile = null;
+            gravityTurnPrograde = false;
             IsControllingThrottle = false;
             Status = message;
         }
@@ -102,6 +132,9 @@ namespace KSPSOS
         {
             if (vessel == null || !IsRunning)
                 return;
+
+            if (HasModule("AUTOSTAGE"))
+                ApplyAutoStage();
 
             if (state == RuntimeState.Holding)
             {
@@ -121,6 +154,11 @@ namespace KSPSOS
             else if (state == RuntimeState.WaitingForApoapsis || state == RuntimeState.Circularizing)
             {
                 TickCircularization();
+                return;
+            }
+            else if (state == RuntimeState.GravityTurning)
+            {
+                TickGravityTurn(deltaTime);
                 return;
             }
 
@@ -177,12 +215,29 @@ namespace KSPSOS
                     commandIndex++;
                     return true;
 
+                case CommandKind.Rcs:
+                    SetRcs(command.Mode);
+                    commandIndex++;
+                    return true;
+
                 case CommandKind.Circ:
                     SetAutopilot(VesselAutopilot.AutopilotMode.Prograde);
                     throttle = 0f;
                     circularBurnStarted = false;
                     state = RuntimeState.WaitingForApoapsis;
                     Status = "Waiting for apoapsis to circularize.";
+                    return true;
+
+                case CommandKind.GravTurn:
+                    gravityTurnProfile = ProfileForBody(command.Body);
+                    gravityTurnElapsed = 0d;
+                    gravityTurnPrograde = false;
+                    pitchInput = 0f;
+                    throttle = 1f;
+                    SetAutopilot(VesselAutopilot.AutopilotMode.StabilityAssist);
+                    state = RuntimeState.GravityTurning;
+                    Status = "Gravity turn profile loaded for " + gravityTurnProfile.Body + ".";
+                    AddLog("GRAVTURN " + gravityTurnProfile.Body + ": target apoapsis " + gravityTurnProfile.TargetApoapsis.ToString("0") + "m.");
                     return true;
 
                 case CommandKind.Abort:
@@ -222,6 +277,12 @@ namespace KSPSOS
                 case CommandKind.Set:
                     flags[command.Variable] = command.BoolValue;
                     AddLog("SET " + command.Variable + " = " + (command.BoolValue ? "TRUE" : "FALSE") + ".");
+                    commandIndex++;
+                    return true;
+
+                case CommandKind.Using:
+                    modules.Add(command.Module);
+                    AddLog("USING " + command.Module + ".");
                     commandIndex++;
                     return true;
             }
@@ -271,10 +332,164 @@ namespace KSPSOS
                 throttle = 0.75f;
         }
 
+        private void TickGravityTurn(float deltaTime)
+        {
+            if (vessel == null || gravityTurnProfile == null)
+                return;
+
+            string currentBody = vessel.mainBody == null ? string.Empty : vessel.mainBody.bodyName.ToUpperInvariant();
+            if (currentBody != gravityTurnProfile.Body)
+            {
+                pitchInput = 0f;
+                throttle = 0f;
+                Stop("GRAVTURN body mismatch: profile " + gravityTurnProfile.Body + ", current body " + currentBody + ".");
+                AddLog("GRAVTURN stopped because the selected body does not match the current vessel body.");
+                return;
+            }
+
+            double altitude = Math.Max(0d, vessel.altitude);
+            double speed = Math.Max(0d, vessel.srfSpeed);
+            double apoapsis = vessel.orbit == null ? 0d : vessel.orbit.ApA;
+
+            if (altitude < gravityTurnProfile.TurnStartAltitude)
+            {
+                pitchInput = 0f;
+                throttle = 1f;
+                return;
+            }
+
+            gravityTurnElapsed += Math.Max(0d, deltaTime);
+
+            if (!gravityTurnPrograde &&
+                (gravityTurnElapsed >= gravityTurnProfile.InitialPitchSeconds ||
+                 altitude >= gravityTurnProfile.TurnEndAltitude) &&
+                speed >= gravityTurnProfile.ProgradeSpeed)
+            {
+                gravityTurnPrograde = true;
+                pitchInput = 0f;
+                SetAutopilot(VesselAutopilot.AutopilotMode.Prograde);
+                AddLog("GRAVTURN: prograde guidance engaged.");
+            }
+            else if (!gravityTurnPrograde)
+            {
+                double pitchFraction = gravityTurnProfile.InitialPitchSeconds <= 0d
+                    ? 1d
+                    : Math.Min(1d, gravityTurnElapsed / gravityTurnProfile.InitialPitchSeconds);
+                pitchInput = gravityTurnProfile.InitialPitchInput * (float)(1d - pitchFraction);
+                throttle = 1f;
+            }
+
+            if (apoapsis >= gravityTurnProfile.TargetApoapsis)
+            {
+                pitchInput = 0f;
+                throttle = 0f;
+                state = RuntimeState.Idle;
+                gravityTurnProfile = null;
+                commandIndex++;
+                Status = "Gravity turn complete.";
+                AddLog("GRAVTURN complete.");
+                return;
+            }
+
+            if (apoapsis > gravityTurnProfile.TargetApoapsis * 0.9)
+                throttle = 0.35f;
+            else
+                throttle = 1f;
+        }
+
+        private static GravityTurnProfile ProfileForBody(string body)
+        {
+            switch (body)
+            {
+                case "KERBIN": return new GravityTurnProfile { Body = "KERBIN", TurnStartAltitude = 100, TurnEndAltitude = 45000, InitialPitchSeconds = 8, InitialPitchInput = -0.12f, ProgradeSpeed = 45, TargetApoapsis = 80000 };
+                case "DUNA": return new GravityTurnProfile { Body = "DUNA", TurnStartAltitude = 50, TurnEndAltitude = 30000, InitialPitchSeconds = 10, InitialPitchInput = -0.08f, ProgradeSpeed = 35, TargetApoapsis = 70000 };
+                case "EVE": return new GravityTurnProfile { Body = "EVE", TurnStartAltitude = 250, TurnEndAltitude = 50000, InitialPitchSeconds = 14, InitialPitchInput = -0.06f, ProgradeSpeed = 60, TargetApoapsis = 90000 };
+                case "LAYTHE": return new GravityTurnProfile { Body = "LAYTHE", TurnStartAltitude = 100, TurnEndAltitude = 35000, InitialPitchSeconds = 9, InitialPitchInput = -0.10f, ProgradeSpeed = 45, TargetApoapsis = 70000 };
+                case "JUPITER":
+                case "JOOL": return new GravityTurnProfile { Body = body, TurnStartAltitude = 300, TurnEndAltitude = 50000, InitialPitchSeconds = 12, InitialPitchInput = -0.06f, ProgradeSpeed = 70, TargetApoapsis = 120000 };
+                case "MUN": return new GravityTurnProfile { Body = "MUN", TurnStartAltitude = 20, TurnEndAltitude = 3000, InitialPitchSeconds = 3, InitialPitchInput = -0.18f, ProgradeSpeed = 15, TargetApoapsis = 20000 };
+                case "MINMUS": return new GravityTurnProfile { Body = "MINMUS", TurnStartAltitude = 10, TurnEndAltitude = 2500, InitialPitchSeconds = 2, InitialPitchInput = -0.20f, ProgradeSpeed = 10, TargetApoapsis = 15000 };
+                case "GILLY": return new GravityTurnProfile { Body = "GILLY", TurnStartAltitude = 5, TurnEndAltitude = 500, InitialPitchSeconds = 1.5, InitialPitchInput = -0.22f, ProgradeSpeed = 5, TargetApoapsis = 10000 };
+                case "IKE": return new GravityTurnProfile { Body = "IKE", TurnStartAltitude = 15, TurnEndAltitude = 2500, InitialPitchSeconds = 3, InitialPitchInput = -0.18f, ProgradeSpeed = 15, TargetApoapsis = 20000 };
+                case "VALL": return new GravityTurnProfile { Body = "VALL", TurnStartAltitude = 20, TurnEndAltitude = 3000, InitialPitchSeconds = 3, InitialPitchInput = -0.18f, ProgradeSpeed = 15, TargetApoapsis = 25000 };
+                case "TYLO": return new GravityTurnProfile { Body = "TYLO", TurnStartAltitude = 30, TurnEndAltitude = 5000, InitialPitchSeconds = 4, InitialPitchInput = -0.16f, ProgradeSpeed = 25, TargetApoapsis = 30000 };
+                case "DRES": return new GravityTurnProfile { Body = "DRES", TurnStartAltitude = 15, TurnEndAltitude = 2500, InitialPitchSeconds = 3, InitialPitchInput = -0.18f, ProgradeSpeed = 15, TargetApoapsis = 20000 };
+                case "BOP": return new GravityTurnProfile { Body = "BOP", TurnStartAltitude = 5, TurnEndAltitude = 800, InitialPitchSeconds = 1.5, InitialPitchInput = -0.22f, ProgradeSpeed = 5, TargetApoapsis = 12000 };
+                case "POL": return new GravityTurnProfile { Body = "POL", TurnStartAltitude = 5, TurnEndAltitude = 800, InitialPitchSeconds = 1.5, InitialPitchInput = -0.22f, ProgradeSpeed = 5, TargetApoapsis = 12000 };
+                case "MOHO": return new GravityTurnProfile { Body = "MOHO", TurnStartAltitude = 50, TurnEndAltitude = 15000, InitialPitchSeconds = 8, InitialPitchInput = -0.10f, ProgradeSpeed = 35, TargetApoapsis = 40000 };
+                case "ELOO": return new GravityTurnProfile { Body = "ELOO", TurnStartAltitude = 15, TurnEndAltitude = 3000, InitialPitchSeconds = 3, InitialPitchInput = -0.18f, ProgradeSpeed = 15, TargetApoapsis = 25000 };
+                default: return new GravityTurnProfile { Body = body, TurnStartAltitude = 100, TurnEndAltitude = 30000, InitialPitchSeconds = 8, InitialPitchInput = -0.10f, ProgradeSpeed = 35, TargetApoapsis = 50000 };
+            }
+        }
+
         private void Stage()
         {
             if (vessel != null)
                 KSP.UI.Screens.StageManager.ActivateNextStage();
+        }
+
+        private bool HasModule(string module)
+        {
+            return modules.Contains(module);
+        }
+
+        private void SetRcs(string action)
+        {
+            if (vessel == null || vessel.ActionGroups == null)
+                return;
+
+            if (action == "TOGGLE")
+                vessel.ActionGroups.ToggleGroup(KSPActionGroup.RCS);
+            else
+                vessel.ActionGroups.SetGroup(KSPActionGroup.RCS, action == "ON");
+            AddLog("RCS " + action + ".");
+        }
+
+        private void ApplyAutoStage()
+        {
+            if (vessel == null || throttle < 0.05f || vessel.currentStage <= 0)
+                return;
+            if (Time.time - lastAutoStageTime < 1f)
+                return;
+
+            bool hasLiquidFuel;
+            bool hasOxidizer;
+            bool hasSolidFuel;
+            double liquidFuel = ReadStageResource("LiquidFuel", out hasLiquidFuel);
+            double oxidizer = ReadStageResource("Oxidizer", out hasOxidizer);
+            double solidFuel = ReadStageResource("SolidFuel", out hasSolidFuel);
+
+            bool liquidStageEmpty = (hasLiquidFuel || hasOxidizer) && liquidFuel <= 0.1 && oxidizer <= 0.1;
+            bool solidStageEmpty = hasSolidFuel && solidFuel <= 0.1;
+            if (!liquidStageEmpty && !solidStageEmpty)
+                return;
+
+            Stage();
+            lastAutoStageTime = Time.time;
+            AddLog("AUTOSTAGE: current stage resources depleted.");
+        }
+
+        private double ReadStageResource(string resourceName, out bool found)
+        {
+            found = false;
+            double total = 0d;
+            if (vessel.parts == null)
+                return total;
+
+            foreach (Part part in vessel.parts)
+            {
+                if (part.inverseStage != vessel.currentStage || part.Resources == null)
+                    continue;
+                foreach (PartResource resource in part.Resources)
+                {
+                    if (resource.resourceName == resourceName)
+                    {
+                        found = true;
+                        total += resource.amount;
+                    }
+                }
+            }
+            return total;
         }
 
         private void SetAutopilot(VesselAutopilot.AutopilotMode mode)

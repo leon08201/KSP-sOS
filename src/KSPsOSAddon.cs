@@ -51,6 +51,8 @@ namespace KSPSOS
         {
             if (runtime.IsControllingThrottle)
                 state.mainThrottle = runtime.Throttle;
+            if (runtime.IsControllingAttitude)
+                state.pitch = runtime.PitchInput;
         }
 
         private void OnGUI()

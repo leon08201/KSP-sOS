@@ -19,7 +19,10 @@ namespace KSPSOS
         Else,
         End,
         When,
-        Set
+        Set,
+        Using,
+        Rcs,
+        GravTurn
     }
 
     internal enum ConditionOperator
@@ -49,6 +52,8 @@ namespace KSPSOS
         public float Number;
         public string Text;
         public string Variable;
+        public string Module;
+        public string Body;
         public bool BoolValue;
         public int Line;
         public int JumpIndex = -1;
@@ -67,6 +72,11 @@ namespace KSPSOS
         {
             "ALTITUDE", "SPEED", "APOAPSIS", "PERIAPSIS", "FUEL", "OXIDIZER", "BATTERY"
         };
+        private static readonly HashSet<string> Modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "AUTOSTAGE", "CLEARSKIES", "AUTOWARP", "MAXSCIENCE", "SCIENCE",
+            "SAFEABORT", "SMARTRCS", "AUTOLAND", "RENDEZVOUS", "DOCKING", "RECOVERY"
+        };
 
         public static List<ScriptCommand> Parse(string source, List<string> errors)
         {
@@ -80,6 +90,7 @@ namespace KSPSOS
             string[] lines = source.Replace("\r", "").Split('\n');
             var ifStack = new Stack<int>();
             var elseStack = new Stack<int>();
+            bool executableCommandSeen = false;
 
             for (int i = 0; i < lines.Length; i++)
             {
@@ -128,6 +139,11 @@ namespace KSPSOS
                     case "CIRCULARIZE":
                         parsed.Kind = CommandKind.Circ;
                         break;
+                    case "GRAVTURN":
+                        parsed.Kind = CommandKind.GravTurn;
+                        if (!ReadBody(tokens, parsed, errors))
+                            continue;
+                        break;
                     case "THROTTLE":
                         parsed.Kind = CommandKind.Throttle;
                         if (!ReadNumber(tokens, 1, parsed, errors, "throttle"))
@@ -143,6 +159,11 @@ namespace KSPSOS
                     case "SAS":
                         parsed.Kind = CommandKind.Sas;
                         if (!ReadMode(tokens, 1, parsed, errors))
+                            continue;
+                        break;
+                    case "RCS":
+                        parsed.Kind = CommandKind.Rcs;
+                        if (!ReadRcs(tokens, parsed, errors))
                             continue;
                         break;
                     case "ABORT":
@@ -194,12 +215,24 @@ namespace KSPSOS
                         if (!ReadBooleanAssignment(tokens, parsed, errors))
                             continue;
                         break;
+                    case "USING":
+                        parsed.Kind = CommandKind.Using;
+                        if (executableCommandSeen)
+                        {
+                            errors.Add("Line " + parsed.Line + ": USING directives must appear before flight commands.");
+                            continue;
+                        }
+                        if (!ReadModule(tokens, parsed, errors))
+                            continue;
+                        break;
                     default:
                         errors.Add("Line " + parsed.Line + ": unknown command '" + tokens[0] + "'.");
                         continue;
                 }
 
                 result.Add(parsed);
+                if (parsed.Kind != CommandKind.Using)
+                    executableCommandSeen = true;
             }
 
             while (ifStack.Count > 0)
@@ -253,6 +286,44 @@ namespace KSPSOS
             }
 
             command.Mode = tokens[index].ToUpperInvariant();
+            return true;
+        }
+
+        private static bool ReadRcs(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count != 2 || (tokens[1].ToUpperInvariant() != "ON" && tokens[1].ToUpperInvariant() != "OFF" && tokens[1].ToUpperInvariant() != "TOGGLE"))
+            {
+                errors.Add("Line " + command.Line + ": use RCS ON, RCS OFF, or RCS TOGGLE.");
+                return false;
+            }
+
+            command.Mode = tokens[1].ToUpperInvariant();
+            return true;
+        }
+
+        private static bool ReadBody(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count != 2)
+            {
+                errors.Add("Line " + command.Line + ": use GRAVTURN followed by a celestial body, for example GRAVTURN KERBIN.");
+                return false;
+            }
+
+            command.Body = tokens[1].ToUpperInvariant();
+            return true;
+        }
+
+        private static bool ReadModule(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count != 2 || !Modules.Contains(tokens[1]))
+            {
+                errors.Add("Line " + command.Line + ": unknown module. Available modules are AUTOSTAGE, CLEARSKIES, AUTOWARP, MAXSCIENCE, SAFEABORT, SMARTRCS, AUTOLAND, RENDEZVOUS, DOCKING, and RECOVERY.");
+                return false;
+            }
+
+            command.Module = tokens[1].ToUpperInvariant();
+            if (command.Module == "SCIENCE")
+                command.Module = "MAXSCIENCE";
             return true;
         }
 
