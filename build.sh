@@ -39,6 +39,7 @@ mcs -target:library -sdk:4.7 -langversion:latest \
     -r:"$managed/UnityEngine.CoreModule.dll" \
     -r:"$managed/UnityEngine.IMGUIModule.dll" \
     -r:"$managed/UnityEngine.InputLegacyModule.dll" \
+    -r:"$managed/UnityEngine.TextRenderingModule.dll" \
     -r:"$managed/UnityEngine.UI.dll" \
     src/*.cs
 

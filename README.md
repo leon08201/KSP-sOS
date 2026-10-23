@@ -72,23 +72,7 @@ The active vessel must be controllable. KSP-sOS does not include or replace KSP'
 
 ## Using the in-game terminal
 
-The terminal has three areas:
-
-### Terminal input
-
-Type one command, including its final semicolon, then press **Enter** or **EXECUTE**.
-
-```text
-PRINT hello from KSP-sOS;
-```
-
-Interactive commands run only when another program is not already running. Press **STOP** first if the terminal reports that it is busy.
-
-When the terminal is open, it takes keyboard/control focus from the flight scene. The command line reads keys directly; you can type as soon as the window opens or click the line to make it active. Left/Right, Home/End, Backspace/Delete, and paste with Ctrl+V or Command+V are supported.
-
-### Program
-
-Click the program area, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line. The editor reads keys directly, supports cursor movement and deletion, and saves edits automatically.
+The terminal has one main mission-script editor. Click the editor, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line, or **SAVE SCRIPT** to save it explicitly. Editing is not saved automatically.
 
 ```text
 LAUNCH;
@@ -102,7 +86,7 @@ CIRC;
 
 This area shows status messages, parser errors, staging, circularization, module activation, and messages from `PRINT`.
 
-Press **F8** again to hide the terminal.
+Press **STOP** to halt a running program, and press **F8** again to hide the terminal.
 
 ### Script library
 
@@ -121,7 +105,7 @@ The folder is created the first time KSP-sOS runs. The prebuilt ZIP does not con
 
 ## Basic syntax rules
 
-Every command must end with a semicolon:
+Commands outside curly-brace blocks must end with a semicolon:
 
 ```text
 LAUNCH;
@@ -157,10 +141,11 @@ WHEN ALTITUDE > 10000 {
 }
 ```
 
-Compact blocks are also accepted when every command still has its semicolon:
+Inside curly-brace blocks, semicolons are optional, including compact one-line blocks:
 
 ```text
-IF ORBIT = SAFE { DEPLOY SOLAR PANELS; };
+IF ORBIT = SAFE { DEPLOY SOLAR PANELS }
+IF ALTITUDE > 10000 { STAGE }
 ```
 
 ## Module directives
@@ -188,6 +173,8 @@ Supported module names are:
 | `using rendezvous;` | Enables the rendezvous controller. |
 | `using docking;` | Enables docking-port selection and final-approach control. |
 | `using recovery;` | Enables the recovery wait; `RECOVER;` pauses until the vessel is landed or splashed. |
+| `using ctrlock;` | Locks vessel controls while the script is running, while leaving camera controls available. |
+| `using manualstage;` | Disables automatic staging; the script waits for explicit `STAGE;` commands. |
 
 Unknown modules and `using` statements placed after flight commands produce parser errors instead of being silently ignored.
 
@@ -348,7 +335,25 @@ GRAVTURN EQUATORIAL KERBIN;
 
 Profiles contain tailored starting altitude, pitch-over timing, prograde hand-off speed, throttle behavior, and target apoapsis. Atmospheric bodies such as Kerbin, Duna, Eve, and Laythe use slower pitch programs; low-gravity bodies such as Mun, Minmus, Gilly, Bop, and Pol use shorter pitch-over phases and lower orbital targets.
 
-The selected body must match the vessel's current celestial body. `GRAVTURN MUN;` will stop safely if the vessel is still around Kerbin. The profile is a strong starting point, not a guarantee for every launch vehicle: thrust-to-weight ratio, drag, payload mass, and staging still affect the result.
+Gravity turns can automatically circularize at a target altitude. If no altitude is supplied, the default is 80 km. The body may be omitted to use the vessel's current body:
+
+```text
+GRAVTURN KERBIN { AUTOCIRC 100KM }
+GRAVTURN { AUTOCIRC }
+```
+
+During flight the controller continuously reads vessel mass, local gravity, live engine thrust, current-stage delta-v, TWR, speed, and apoapsis error. It uses those values to choose throttle, soften the pitch program for low-delta-v stages, stage only when allowed by the active modules, and taper thrust as the target apoapsis is approached. The profiles remain safe starting envelopes because no generic controller can predict every vehicle's drag, steering authority, or engine layout.
+
+`KEEP SPEED` holds a target speed with a bounded feedback controller. It is intentionally a blocking command until `STOP` is pressed or the script is stopped:
+
+```text
+KEEP SPEED 250M/S;
+KEEP SPEED SURFACE 250M/S;
+KEEP SPEED ORBITAL 2200M/S;
+KEEP SPEED VERTICAL 10M/S;
+```
+
+`M/S` (or `MS`) is optional. `SURFACE` is the default.
 
 ### `HOHMANN TO <body>;`
 
@@ -362,14 +367,14 @@ For a moon or other body inside the current parent body's sphere of influence, K
 
 This command currently **plans the node but does not execute the burn**. Plane changes and detailed launch-window correction are not included, so check the node, inclination, phase angle, and available delta-v in map view before burning.
 
-### `EXECUTE NODE;`
+### `EXEC;` and `EXECUTE NODE;`
 
 Executes the next maneuver node in the vessel's KSP maneuver list. KSP's maneuver autopilot controls attitude while KSP-sOS estimates burn duration from the vessel's current delta-v and burn-time data, applies a bounded full-throttle burn, and removes the node when the burn completes:
 
 ```text
 using autowarp;
 HOHMANN TO DUNA;
-EXECUTE NODE;
+EXEC;
 ```
 
 This is an assisted burn controller, not a proof of exact delta-v delivery. Test it with a recoverable save and verify the node before committing.
@@ -540,7 +545,7 @@ WHEN APOAPSIS > 80000 {
 
 ### Syntax colors and diagnostics
 
-The terminal includes a syntax preview beneath the program editor. Logic is purple, burns and orbit maneuvers are orange, vessel controls are yellow, science is blue, mission/navigation commands are green, general commands are cyan, numbers are yellow, comments are green, and unknown command words are red. Parser errors appear below the preview with their line number, so misspellings are visible before you run the program.
+The terminal includes a syntax preview beneath the program editor. Logic is purple, flight/orbit commands are yellow, vessel commands are blue, science is cyan, mission/navigation commands are green, numbers are pale green, comments are muted green, and unknown command words are bright red. Parser errors appear below the preview with their line number, so misspellings are visible before you run the program. Right-click the terminal to toggle compact mode; clicking outside it does not hide it and leaves the camera available.
 
 ## Telemetry conditions
 
@@ -649,6 +654,8 @@ The current KSP-sOS version supports:
 - Stock-experiment execution, collection, and optional antenna transmission through `SCIENCE AUTO;` with `using maxscience;`.
 - Safe-orbit telemetry conditions and stock solar-panel deployment through `ORBIT = SAFE` and `DEPLOY SOLAR PANELS;`.
 - Body-specific gravity-turn presets through `GRAVTURN <body>;`.
+- Live gravity-turn adaptation using vessel mass, thrust-to-weight ratio, active-stage delta-v, apoapsis error, and speed feedback.
+- Target-speed feedback control through `KEEP SPEED`.
 - Equatorial-by-default ascent and opt-in polar ascent/arrival through `GRAVTURN POLAR <body>;` and `POLAR ORBIT AROUND <body>;`.
 - Approximate local and interplanetary transfer-node planning through `HOHMANN TO <body>;` and `TRANSFER TO <body>;`.
 - Long-mission transfer continuation: after an executed transfer, `LAND ON <body>;` waits for destination sphere-of-influence entry before starting descent guidance.
@@ -658,6 +665,8 @@ The current KSP-sOS version supports:
 - Compatible-port selection and final-approach control through `DOCK TO TARGET`, `AUTODOCK`, and `APOLLO DOCK`.
 - Assisted descent and landed-state recovery checks through `LAND ON` and `RECOVER`.
 - Mission-assist profile activation through `*WALK IN THE PARK*;`.
+- Optional manual staging through `using manualstage;`, which disables both automatic module staging and gravity-turn low-delta-v staging.
+- Optional vessel-control protection through `using ctrlock;`, which locks vessel controls while the script runs but leaves the camera and pause controls available.
 
 Transfer nodes remain approximate. `EXECUTE NODE;` can commit the next node, but verify phase angle, inclination, node direction, and available delta-v in map view before committing to a long interplanetary burn.
 
@@ -693,6 +702,10 @@ Check that:
 ### The program is not responding
 
 `WHEN` and `CIRC` intentionally wait for game conditions. Press **STOP** to release script throttle control and stop the program.
+
+### Mission templates
+
+The program editor includes starter templates for launch-to-orbit, transfer-and-land, and rendezvous/docking missions. Select a template, replace placeholder body names, and review the syntax preview before running it. **CLEAR PROGRAM** starts a blank saved script.
 
 ## Build from source
 

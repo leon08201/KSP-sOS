@@ -18,27 +18,25 @@ namespace KSPSOS
         private Vector2 syntaxScroll;
         private Vector2 logScroll;
         private string script = DefaultScript;
-        private string terminalInput = string.Empty;
-        private int terminalCursor;
         private bool visible;
-        private bool focusTerminalOnOpen;
+        private bool compactTerminal;
         private bool focusProgramEditor;
-        private bool terminalInputActive;
         private bool programEditorActive;
         private int programCursor;
         private int lastF8ToggleFrame = -1;
         private bool terminalControlLockActive;
-        private Rect terminalInputRect;
         private string scriptsDirectory;
         private string currentScriptPath;
         private string scriptStorageStatus = "Not saved yet";
-        private float scriptSaveDueTime = -1f;
         private int reuseIndex = -1;
         private GUIStyle wrappedLabel;
         private GUIStyle richLabel;
         private GUIStyle errorLabel;
-        private GUIStyle terminalLineStyle;
         private GUIStyle programEditorStyle;
+        private GUIStyle titleStyle;
+        private GUIStyle sectionStyle;
+        private GUIStyle hintStyle;
+        private GUIStyle compactButtonStyle;
         private Vessel subscribedVessel;
         private const string EditorIndent = "    ";
         private const string TerminalControlLockId = "KSPsOSTerminal";
@@ -61,13 +59,12 @@ namespace KSPSOS
             if (HighLogic.LoadedScene != GameScenes.FLIGHT)
             {
                 visible = false;
-                terminalInputActive = false;
                 programEditorActive = false;
                 SetTerminalControlLock(false);
                 return;
             }
 
-            SetTerminalControlLock(visible);
+            SetTerminalControlLock(runtime.RequestsControlLock);
 
             Vessel activeVessel = FlightGlobals.ActiveVessel;
             if (activeVessel != subscribedVessel)
@@ -88,11 +85,6 @@ namespace KSPSOS
                 Debug.LogError("[KSP-sOS] Flight script failed: " + exception);
                 runtime.Stop("Script stopped after an error. Check KSP.log.");
             }
-            if (scriptSaveDueTime >= 0f && Time.time >= scriptSaveDueTime)
-            {
-                SaveCurrentScript();
-                scriptSaveDueTime = -1f;
-            }
         }
 
         private void OnDestroy()
@@ -100,7 +92,6 @@ namespace KSPSOS
             SetTerminalControlLock(false);
             if (subscribedVessel != null)
                 subscribedVessel.OnFlyByWire -= OnFlyByWire;
-            SaveCurrentScript();
             runtime.Stop("Stopped.");
         }
 
@@ -140,19 +131,24 @@ namespace KSPSOS
             if (!visible || HighLogic.LoadedScene != GameScenes.FLIGHT)
                 return;
 
-            // Match kOS's behavior: the active terminal owns keyboard/control input
-            // while it is open, then releases it as soon as it is hidden.
-            SetTerminalControlLock(true);
+            // The terminal itself remains non-blocking so the player can look around
+            // and pause.  `using ctrlock;` opts a running script into vessel control lock.
+            SetTerminalControlLock(runtime.RequestsControlLock);
             GUI.skin = HighLogic.Skin;
 
             if (Event.current.type == EventType.MouseDown && !windowRect.Contains(Event.current.mousePosition))
             {
-                terminalInputActive = false;
                 programEditorActive = false;
             }
+            if (Event.current.type == EventType.MouseDown && Event.current.button == 1 &&
+                windowRect.Contains(Event.current.mousePosition))
+            {
+                compactTerminal = !compactTerminal;
+                Event.current.Use();
+                return;
+            }
 
-            // Process keys before GUI.Window can route them to another IMGUI control.
-            HandleTerminalKeyboardFallback();
+            // Process editor keys before GUI.Window can route them to another IMGUI control.
             HandleProgramKeyboard();
 
             if (wrappedLabel == null)
@@ -163,10 +159,22 @@ namespace KSPSOS
                 richLabel.richText = true;
                 errorLabel = new GUIStyle(richLabel);
                 errorLabel.normal.textColor = new Color(1f, 0.35f, 0.35f);
-                terminalLineStyle = new GUIStyle(GUI.skin.box);
-                terminalLineStyle.wordWrap = false;
+                errorLabel.fontStyle = FontStyle.Bold;
                 programEditorStyle = new GUIStyle(GUI.skin.textArea);
                 programEditorStyle.wordWrap = false;
+                titleStyle = new GUIStyle(GUI.skin.label);
+                titleStyle.fontSize = 16;
+                titleStyle.fontStyle = FontStyle.Bold;
+                titleStyle.normal.textColor = new Color(0.45f, 0.85f, 1f);
+                sectionStyle = new GUIStyle(GUI.skin.box);
+                sectionStyle.fontStyle = FontStyle.Bold;
+                sectionStyle.alignment = TextAnchor.MiddleLeft;
+                sectionStyle.normal.textColor = new Color(0.75f, 0.9f, 1f);
+                hintStyle = new GUIStyle(wrappedLabel);
+                hintStyle.fontSize = 11;
+                hintStyle.normal.textColor = new Color(0.7f, 0.75f, 0.8f);
+                compactButtonStyle = new GUIStyle(GUI.skin.button);
+                compactButtonStyle.fontSize = 11;
             }
 
             windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, "KSP-sOS Terminal");
@@ -179,8 +187,8 @@ namespace KSPSOS
 
             lastF8ToggleFrame = Time.frameCount;
             visible = !visible;
-            focusTerminalOnOpen = visible;
-            terminalInputActive = visible;
+            focusProgramEditor = visible;
+            programEditorActive = visible;
             if (!visible)
                 programEditorActive = false;
         }
@@ -191,7 +199,7 @@ namespace KSPSOS
                 return;
 
             if (locked)
-                InputLockManager.SetControlLock(ControlTypes.All, TerminalControlLockId);
+                InputLockManager.SetControlLock(ControlTypes.ALLBUTCAMERAS, TerminalControlLockId);
             else
                 InputLockManager.RemoveControlLock(TerminalControlLockId);
 
@@ -200,49 +208,16 @@ namespace KSPSOS
 
         private void DrawWindow(int id)
         {
-            GUILayout.Label("KSP-sOS — simple operating system", wrappedLabel);
-            GUILayout.Label("Type a command below and press ENTER, or edit a program and run it. F8 toggles the terminal.", wrappedLabel);
+            GUILayout.Label("KSP-sOS", titleStyle);
+            GUILayout.Label("Write one mission here, save it explicitly, then run it. F8 hides it; right-click toggles compact mode.", hintStyle);
 
-            GUILayout.Label("Terminal input", GUI.skin.box);
-            GUILayout.BeginHorizontal();
-            terminalCursor = Mathf.Clamp(terminalCursor, 0, terminalInput.Length);
-            string displayedInput = terminalInputActive
-                ? terminalInput.Insert(terminalCursor, "|")
-                : terminalInput;
-            GUILayout.Box("> " + displayedInput, terminalLineStyle, GUILayout.ExpandWidth(true), GUILayout.Height(28f));
-            terminalInputRect = GUILayoutUtility.GetLastRect();
-            if (Event.current.type == EventType.MouseDown)
-            {
-                if (terminalInputRect.Contains(Event.current.mousePosition))
-                {
-                    terminalInputActive = true;
-                    programEditorActive = false;
-                    GUI.FocusControl(string.Empty);
-                }
-                else
-                {
-                    terminalInputActive = false;
-                }
-            }
-            if (focusTerminalOnOpen)
-            {
-                focusTerminalOnOpen = false;
-                terminalInputActive = true;
-            }
-            if (GUILayout.Button("EXECUTE", GUILayout.Width(90f), GUILayout.Height(28f)))
-            {
-                ExecuteTerminalLine();
-            }
-            GUILayout.EndHorizontal();
-
-            GUILayout.Label("Program", GUI.skin.box);
+            GUILayout.Label("Mission script", sectionStyle);
             GUILayout.Label("Script file: " + scriptStorageStatus, wrappedLabel);
-            editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(190f));
+            editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(compactTerminal ? 150f : 190f));
             if (focusProgramEditor)
             {
                 focusProgramEditor = false;
                 programEditorActive = true;
-                terminalInputActive = false;
             }
             programCursor = Mathf.Clamp(programCursor, 0, script.Length);
             string displayedScript = programEditorActive ? script.Insert(programCursor, "|") : script;
@@ -253,7 +228,6 @@ namespace KSPSOS
                 if (programEditorRect.Contains(Event.current.mousePosition))
                 {
                     programEditorActive = true;
-                    terminalInputActive = false;
                     programCursor = script.Length;
                     GUI.FocusControl(string.Empty);
                 }
@@ -262,143 +236,83 @@ namespace KSPSOS
             }
             GUILayout.EndScrollView();
 
-            GUILayout.Label("Syntax preview", GUI.skin.box);
-            GUILayout.Label("<color=#C792EA>logic</color>  <color=#F78C6C>burns/orbits</color>  <color=#FFCB6B>vessel control</color>  <color=#82AAFF>science</color>  <color=#C3E88D>mission</color>  <color=#4FC3F7>general</color>  <color=#FF5370>unknown</color>", richLabel);
-            syntaxScroll = GUILayout.BeginScrollView(syntaxScroll, GUILayout.Height(115f));
-            string[] previewLines = script.Replace("\r", "").Split('\n');
-            for (int i = 0; i < previewLines.Length; i++)
-                GUILayout.Label(HighlightLine(previewLines[i]), richLabel);
-            GUILayout.EndScrollView();
-
-            var parseErrors = new List<string>();
-            CommandParser.Parse(script, parseErrors);
-            for (int i = 0; i < parseErrors.Count; i++)
-                GUILayout.Label(parseErrors[i], errorLabel);
-
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("RUN PROGRAM", GUILayout.Height(30f)))
-            {
-                SaveCurrentScript();
                 runtime.Run(script);
-            }
+            if (GUILayout.Button("SAVE SCRIPT", GUILayout.Height(30f)))
+                SaveCurrentScript();
             if (GUILayout.Button("STOP", GUILayout.Height(30f)))
                 runtime.Stop("Stopped by user.");
             if (GUILayout.Button("CLEAR LOG", GUILayout.Height(30f)))
                 runtime.ClearLog();
             GUILayout.EndHorizontal();
 
+            if (!compactTerminal)
+            {
+                GUILayout.Label("Mission templates", sectionStyle);
+                GUILayout.Label("Choose a starter program. Replace placeholder body names before running.", hintStyle);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("LAUNCH + ORBIT", compactButtonStyle, GUILayout.Height(25f)))
+                    LoadMissionTemplate("LaunchOrbit", "# Simple launch to orbit\nLAUNCH;\nHOLD PG 10;\nSTAGE;\nHOLD 5;\nCIRC;\n");
+                if (GUILayout.Button("TRANSFER + LAND", compactButtonStyle, GUILayout.Height(25f)))
+                    LoadMissionTemplate("TransferLand", "# Replace MUN with the destination body\nHOHMANN TO MUN;\nEXEC;\nLAND ON MUN;\nRECOVER;\n");
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("RENDEZVOUS + DOCK", compactButtonStyle, GUILayout.Height(25f)))
+                    LoadMissionTemplate("Docking", "# Select a target vessel in KSP first\nDISTANCE 100;\nRENDEZVOUS WITH TARGET;\nAUTODOCK;\n");
+                if (GUILayout.Button("CLEAR PROGRAM", compactButtonStyle, GUILayout.Height(25f)))
+                    LoadMissionTemplate("NewScript", string.Empty);
+                GUILayout.EndHorizontal();
+
+                GUILayout.Label("Syntax preview", sectionStyle);
+                GUILayout.Label("<color=#C586C0>logic</color>  <color=#DCDCAA>flight/orbit</color>  <color=#569CD6>vessel</color>  <color=#4FC1FF>science</color>  <color=#4EC9B0>mission</color>  <color=#D4D4D4>general</color>  <color=#F44747>unknown</color>  <color=#B5CEA8>numbers</color>  <color=#6A9955>comments</color>", richLabel);
+                syntaxScroll = GUILayout.BeginScrollView(syntaxScroll, GUILayout.Height(115f));
+                string[] previewLines = script.Replace("\r", "").Split('\n');
+                for (int i = 0; i < previewLines.Length; i++)
+                    GUILayout.Label(HighlightLine(previewLines[i]), richLabel);
+                GUILayout.EndScrollView();
+            }
+
+            var parseErrors = new List<string>();
+            CommandParser.Parse(script, parseErrors);
+            for (int i = 0; i < parseErrors.Count; i++)
+                GUILayout.Label(parseErrors[i], errorLabel);
+
             GUILayout.Label("Status: " + runtime.Status, wrappedLabel);
-            GUILayout.Label("Terminal output", GUI.skin.box);
-            logScroll = GUILayout.BeginScrollView(logScroll, GUILayout.Height(190f));
-            for (int i = 0; i < runtime.Log.Count; i++)
-                GUILayout.Label(runtime.Log[i], wrappedLabel);
-            GUILayout.EndScrollView();
+            if (!compactTerminal)
+            {
+                GUILayout.Label("Terminal output", sectionStyle);
+                logScroll = GUILayout.BeginScrollView(logScroll, GUILayout.Height(190f));
+                for (int i = 0; i < runtime.Log.Count; i++)
+                    GUILayout.Label(runtime.Log[i], wrappedLabel);
+                GUILayout.EndScrollView();
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Commands: LAUNCH, STAGE, HOLD, CIRC, THROTTLE, SAS, ABORT, IF, WHEN, SET", wrappedLabel);
-            GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Commands: LAUNCH, STAGE, HOLD, CIRC, THROTTLE, SAS, ABORT, IF, WHEN, SET", wrappedLabel);
+                GUILayout.EndHorizontal();
 
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("WRITE NEW SCRIPT", GUILayout.Height(28f)))
-                WriteNewScript();
-            if (GUILayout.Button("REUSE SCRIPT", GUILayout.Height(28f)))
-                ReuseScript();
-            GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("WRITE NEW SCRIPT", GUILayout.Height(28f)))
+                    WriteNewScript();
+                if (GUILayout.Button("REUSE SCRIPT", GUILayout.Height(28f)))
+                    ReuseScript();
+                GUILayout.EndHorizontal();
+            }
 
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 25f));
         }
 
-        private void ExecuteTerminalLine()
+        private void LoadMissionTemplate(string name, string template)
         {
-            string line = terminalInput.Trim();
-            if (line.Length == 0)
-                return;
-
-            runtime.RunInteractiveLine(line);
-            terminalInput = string.Empty;
-            terminalCursor = 0;
-        }
-
-        private void HandleTerminalKeyboardFallback()
-        {
-            // kOS processes terminal keys from the IMGUI event stream. Keep this
-            // command line independent of Unity's text-field focus as well.
-            if (!terminalInputActive || Event.current.type != EventType.KeyDown)
-                return;
-
-            if (Event.current.keyCode == KeyCode.V &&
-                (Event.current.control || Event.current.command))
-            {
-                string pasted = GUIUtility.systemCopyBuffer;
-                if (!string.IsNullOrEmpty(pasted))
-                {
-                    pasted = pasted.Replace("\r", " ").Replace("\n", " ");
-                    terminalInput = terminalInput.Insert(terminalCursor, pasted);
-                    terminalCursor += pasted.Length;
-                }
-                Event.current.Use();
-                return;
-            }
-
-            EventModifiers blockedModifiers = EventModifiers.Control | EventModifiers.Command | EventModifiers.Alt;
-            if ((Event.current.modifiers & blockedModifiers) != 0)
-                return;
-
-            if (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
-            {
-                ExecuteTerminalLine();
-                Event.current.Use();
-                return;
-            }
-
-            if (Event.current.keyCode == KeyCode.Backspace)
-            {
-                if (terminalCursor > 0)
-                {
-                    terminalInput = terminalInput.Remove(terminalCursor - 1, 1);
-                    terminalCursor--;
-                }
-                Event.current.Use();
-                return;
-            }
-
-            if (Event.current.keyCode == KeyCode.Delete)
-            {
-                if (terminalCursor < terminalInput.Length)
-                    terminalInput = terminalInput.Remove(terminalCursor, 1);
-                Event.current.Use();
-                return;
-            }
-
-            if (Event.current.keyCode == KeyCode.LeftArrow || Event.current.keyCode == KeyCode.RightArrow ||
-                Event.current.keyCode == KeyCode.Home || Event.current.keyCode == KeyCode.End)
-            {
-                switch (Event.current.keyCode)
-                {
-                    case KeyCode.LeftArrow: terminalCursor = Math.Max(0, terminalCursor - 1); break;
-                    case KeyCode.RightArrow: terminalCursor = Math.Min(terminalInput.Length, terminalCursor + 1); break;
-                    case KeyCode.Home: terminalCursor = 0; break;
-                    case KeyCode.End: terminalCursor = terminalInput.Length; break;
-                }
-                Event.current.Use();
-                return;
-            }
-
-            if (Event.current.keyCode == KeyCode.Escape)
-            {
-                terminalInputActive = false;
-                GUI.FocusControl(string.Empty);
-                Event.current.Use();
-                return;
-            }
-
-            char character = Event.current.character;
-            if (character >= ' ' && character < '\ue000' && character != '\u007f')
-            {
-                terminalInput = terminalInput.Insert(terminalCursor, character.ToString());
-                terminalCursor++;
-                Event.current.Use();
-            }
+            currentScriptPath = CreateScriptPath();
+            script = template;
+            programCursor = script.Length;
+            reuseIndex = -1;
+            scriptStorageStatus = string.IsNullOrEmpty(currentScriptPath)
+                ? name + " (not saved)"
+                : Path.GetFileName(currentScriptPath);
+            focusProgramEditor = true;
+            programEditorActive = true;
         }
 
         private void HandleProgramKeyboard()
@@ -439,7 +353,6 @@ namespace KSPSOS
                     {
                         script = script.Remove(programCursor - 1, 1);
                         programCursor--;
-                        QueueScriptSave();
                     }
                     key.Use();
                     return;
@@ -447,7 +360,6 @@ namespace KSPSOS
                     if (programCursor < script.Length)
                     {
                         script = script.Remove(programCursor, 1);
-                        QueueScriptSave();
                     }
                     key.Use();
                     return;
@@ -508,7 +420,6 @@ namespace KSPSOS
         {
             script = script.Insert(programCursor, inserted);
             programCursor += inserted.Length;
-            QueueScriptSave();
         }
 
         private int ProgramLineStart()
@@ -553,15 +464,6 @@ namespace KSPSOS
             {
                 scriptStorageStatus = "Storage unavailable: " + exception.Message;
             }
-        }
-
-        private void QueueScriptSave()
-        {
-            EnsureScriptDirectory();
-            if (string.IsNullOrEmpty(currentScriptPath))
-                currentScriptPath = CreateScriptPath();
-            scriptStorageStatus = Path.GetFileName(currentScriptPath) + " (saving...)";
-            scriptSaveDueTime = Time.time + 0.5f;
         }
 
         private void SaveCurrentScript()
@@ -621,7 +523,6 @@ namespace KSPSOS
 
         private void WriteNewScript()
         {
-            SaveCurrentScript();
             currentScriptPath = CreateScriptPath();
             script = string.Empty;
             programCursor = 0;
@@ -631,13 +532,10 @@ namespace KSPSOS
                 : Path.GetFileName(currentScriptPath);
             focusProgramEditor = true;
             programEditorActive = true;
-            terminalInputActive = false;
-            SaveCurrentScript();
         }
 
         private void ReuseScript()
         {
-            SaveCurrentScript();
             string[] files = SavedScripts();
             if (files.Length == 0)
             {
@@ -663,7 +561,6 @@ namespace KSPSOS
                 scriptStorageStatus = Path.GetFileName(currentScriptPath);
                 focusProgramEditor = true;
                 programEditorActive = true;
-                terminalInputActive = false;
             }
             catch (Exception exception)
             {
@@ -682,7 +579,7 @@ namespace KSPSOS
             string escaped = EscapeRichText(code);
 
             if (Regex.IsMatch(code.Trim(), @"^[{}]"))
-                escaped = "<color=#C792EA>" + escaped + "</color>";
+                escaped = "<color=#FFD700>" + escaped + "</color>";
             else
             {
                 Match first = Regex.Match(code, @"^\s*([A-Za-z_*]+)");
@@ -690,7 +587,7 @@ namespace KSPSOS
                 {
                     string word = first.Groups[1].Value;
                     string upper = word.ToUpperInvariant();
-                    string color = SyntaxColor(upper) ?? "#FF5370";
+                    string color = SyntaxColor(upper) ?? "#F44747";
                     string highlightedWord = "<color=" + color + ">" + EscapeRichText(word) + "</color>";
                     int wordIndex = first.Groups[1].Index;
                     string rest = EscapeRichText(code.Substring(wordIndex + word.Length));
@@ -704,7 +601,8 @@ namespace KSPSOS
             }
 
             // Do not match the digits inside generated rich-text colour tags, such as #FF5370.
-            escaped = Regex.Replace(escaped, @"(?<![A-Za-z0-9_#])(-?\d+(?:\.\d+)?)(?![A-Za-z0-9_])", "<color=#FFCB6B>$1</color>");
+            escaped = Regex.Replace(escaped, @"(?<![A-Za-z0-9_#])(-?\d+(?:\.\d+)?)(?![A-Za-z0-9_])", "<color=#B5CEA8>$1</color>");
+            escaped = Regex.Replace(escaped, @"""([^""]*)""", "<color=#CE9178>\"$1\"</color>");
             if (!string.IsNullOrEmpty(comment))
                 escaped += "<color=#6A9955>" + EscapeRichText(comment) + "</color>";
             return escaped;
@@ -727,11 +625,16 @@ namespace KSPSOS
                 case "ORBIT":
                 case "SAFE":
                 case "UNSAFE":
-                    return "#C792EA";
+                    return "#C586C0";
                 case "CIRC":
                 case "CIRCULARIZE":
                 case "CIRCULARISE":
                 case "GRAVTURN":
+                case "KEEP":
+                case "SPEED":
+                case "SURFACE":
+                case "ORBITAL":
+                case "VERTICAL":
                 case "POLAR":
                 case "EQUATORIAL":
                 case "HOHMANN":
@@ -739,7 +642,7 @@ namespace KSPSOS
                 case "EXECUTE":
                 case "ALIGN":
                 case "THROTTLE":
-                    return "#F78C6C";
+                    return "#DCDCAA";
                 case "LAUNCH":
                 case "STAGE":
                 case "HOLD":
@@ -748,16 +651,16 @@ namespace KSPSOS
                 case "RCS":
                 case "ABORT":
                 case "DEPLOY":
-                    return "#FFCB6B";
+                    return "#569CD6";
                 case "SCIENCE":
                 case "DO":
                 case "AUTO":
                 case "COLLECT":
                 case "TRANSMIT":
                 case "MAXSCIENCE":
-                    return "#82AAFF";
+                    return "#4FC1FF";
                 case "AUTOSTAGE":
-                    return "#FFCB6B";
+                    return "#569CD6";
                 case "RENDEZVOUS":
                 case "DOCK":
                 case "AUTODOCK":
@@ -786,9 +689,9 @@ namespace KSPSOS
                 case "RECOVERY":
                 case "SOLAR":
                 case "PANELS":
-                    return "#C3E88D";
+                    return "#4EC9B0";
                 case "PRINT":
-                    return "#4FC3F7";
+                    return "#DCDCAA";
                 default:
                     return null;
             }

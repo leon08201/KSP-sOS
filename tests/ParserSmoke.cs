@@ -6,10 +6,10 @@ internal static class ParserSmoke
 {
     private static void Main()
     {
-        string valid = "using maxscience;\nSCIENCE AUTO;\nSCIENCE TRANSMIT;\nSET READY = TRUE;\nHOHMANN TO DUNA;\nALIGN PLANE TO TARGET;\nEXECUTE NODE;\nAPOLLO DOCK TO TARGET;\nIF APOAPSIS > 100KM {\n CIRCULARISE 100KM;\n} ELSE {\n PRINT wait;\n}\n*WALK IN THE PARK*;";
+        string valid = "using maxscience;\nusing ctrlock;\nusing manualstage;\nSCIENCE AUTO;\nSCIENCE TRANSMIT;\nSET READY = TRUE;\nHOHMANN TO DUNA;\nALIGN PLANE TO TARGET;\nEXEC;\nKEEP SPEED SURFACE 250M/S;\nAPOLLO DOCK TO TARGET;\nIF APOAPSIS > 100KM {\n CIRCULARISE 100KM\n} ELSE {\n PRINT wait\n}\nGRAVTURN KERBIN { AUTOCIRC 80KM }\n*WALK IN THE PARK*;";
         var errors = new List<string>();
         var commands = CommandParser.Parse(valid, errors);
-        if (errors.Count != 0 || commands.Count != 15)
+        if (errors.Count != 0 || commands.Count != 19)
             Fail("valid command set", errors, commands.Count);
 
         errors.Clear();
@@ -44,6 +44,16 @@ internal static class ParserSmoke
         CommandParser.Parse("IF ORBIT = SAFE { DEPLOY SOLAR PANELS; };", errors);
         if (errors.Count != 0)
             Fail("inline safety block", errors, errors.Count);
+
+        errors.Clear();
+        CommandParser.Parse("GRAVTURN { AUTOCIRC };", errors);
+        if (errors.Count != 0)
+            Fail("default gravity-turn autocirc", errors, errors.Count);
+
+        errors.Clear();
+        CommandParser.Parse("KEEP SPEED 250M/S;\nKEEP SPEED ORBITAL 1200;\nKEEP SPEED VERTICAL 10MS;", errors);
+        if (errors.Count != 0)
+            Fail("keep-speed syntax", errors, errors.Count);
 
         Console.WriteLine("KSP-sOS parser smoke test passed.");
     }

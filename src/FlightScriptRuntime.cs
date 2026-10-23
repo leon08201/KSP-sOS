@@ -21,7 +21,8 @@ namespace KSPSOS
             WaitingForRecovery,
             WaitingForBody,
             WaitingForManeuver,
-            ExecutingManeuver
+            ExecutingManeuver,
+            HoldingSpeed
         }
 
         private sealed class GravityTurnProfile
@@ -50,6 +51,11 @@ namespace KSPSOS
         private double gravityTurnElapsed;
         private bool gravityTurnPrograde;
         private bool gravityTurnPolar;
+        private bool gravityTurnAutoCircularize;
+        private double gravityTurnCircularizeAltitude;
+        private double keepSpeedTarget;
+        private string keepSpeedMode;
+        private float gravityTurnLogTimer;
         private float pitchInput;
         private float scienceTimer;
         private double circularTargetAltitude = -1d;
@@ -94,6 +100,7 @@ namespace KSPSOS
         public bool IsControllingTranslation { get { return state == RuntimeState.Rendezvousing || state == RuntimeState.Docking; } }
         public bool IsRunning { get { return state != RuntimeState.Idle || commandIndex < commands.Count; } }
         public bool IsControllingThrottle { get; private set; }
+        public bool RequestsControlLock { get { return IsRunning && HasModule("CTRLOCK"); } }
         public string Status { get; private set; }
         public IReadOnlyList<string> Log { get { return log; } }
 
@@ -139,6 +146,11 @@ namespace KSPSOS
             gravityTurnElapsed = 0d;
             gravityTurnPrograde = false;
             gravityTurnPolar = false;
+            gravityTurnAutoCircularize = false;
+            gravityTurnCircularizeAltitude = -1d;
+            keepSpeedTarget = 0d;
+            keepSpeedMode = "SURFACE";
+            gravityTurnLogTimer = 0f;
             scienceTimer = 0f;
             pitchInput = 0f;
             yawInput = 0f;
@@ -197,6 +209,11 @@ namespace KSPSOS
             gravityTurnProfile = null;
             gravityTurnPrograde = false;
             gravityTurnPolar = false;
+            gravityTurnAutoCircularize = false;
+            gravityTurnCircularizeAltitude = -1d;
+            keepSpeedTarget = 0d;
+            keepSpeedMode = "SURFACE";
+            gravityTurnLogTimer = 0f;
             yawInput = 0f;
             rollInput = 0f;
             translationX = 0f;
@@ -273,6 +290,11 @@ namespace KSPSOS
             else if (state == RuntimeState.GravityTurning)
             {
                 TickGravityTurn(deltaTime);
+                return;
+            }
+            else if (state == RuntimeState.HoldingSpeed)
+            {
+                TickKeepSpeed(deltaTime);
                 return;
             }
             else if (state == RuntimeState.ProcessingScience)
@@ -422,10 +444,17 @@ namespace KSPSOS
                     return true;
 
                 case CommandKind.GravTurn:
-                    gravityTurnProfile = ProfileForBody(command.Body);
+                    string gravityBody = string.IsNullOrEmpty(command.Body)
+                        ? (vessel == null || vessel.mainBody == null ? string.Empty : vessel.mainBody.bodyName.ToUpperInvariant())
+                        : command.Body;
+                    gravityTurnProfile = ProfileForBody(gravityBody);
                     gravityTurnElapsed = 0d;
                     gravityTurnPrograde = false;
                     gravityTurnPolar = command.Polar;
+                    gravityTurnAutoCircularize = command.HasTargetAltitude;
+                    gravityTurnCircularizeAltitude = command.HasTargetAltitude ? command.Number : -1d;
+                    if (gravityTurnAutoCircularize)
+                        gravityTurnProfile.TargetApoapsis = command.Number;
                     pitchInput = 0f;
                     throttle = 1f;
                     SetAutopilot(VesselAutopilot.AutopilotMode.StabilityAssist);
@@ -433,7 +462,16 @@ namespace KSPSOS
                     gravityCommandAlreadyAdvanced = false;
                     launchPlanePending = false;
                     Status = "Gravity turn profile loaded for " + gravityTurnProfile.Body + ".";
-                    AddLog("GRAVTURN " + gravityTurnProfile.Body + ": target apoapsis " + gravityTurnProfile.TargetApoapsis.ToString("0") + "m.");
+                    AddLog("GRAVTURN " + gravityTurnProfile.Body + ": target apoapsis " + gravityTurnProfile.TargetApoapsis.ToString("0") + "m" + (gravityTurnAutoCircularize ? "; auto-circularization enabled." : "."));
+                    return true;
+
+                case CommandKind.KeepSpeed:
+                    keepSpeedTarget = Math.Max(0d, command.Number);
+                    keepSpeedMode = string.IsNullOrEmpty(command.Mode) ? "SURFACE" : command.Mode;
+                    SetAutopilot(VesselAutopilot.AutopilotMode.Prograde);
+                    state = RuntimeState.HoldingSpeed;
+                    Status = "Holding " + keepSpeedTarget.ToString("0.##") + "m/s " + keepSpeedMode.ToLowerInvariant() + " speed.";
+                    AddLog("KEEP SPEED: target " + keepSpeedTarget.ToString("0.##") + "m/s (" + keepSpeedMode + ").");
                     return true;
 
                 case CommandKind.PolarOrbit:
@@ -1288,6 +1326,37 @@ namespace KSPSOS
             AddLog("EXECUTE NODE: burn complete; maneuver node removed.");
         }
 
+        private void TickKeepSpeed(float deltaTime)
+        {
+            if (vessel == null)
+                return;
+
+            double actual = ReadSpeedForMode(keepSpeedMode);
+            double error = keepSpeedTarget - actual;
+            // A deliberately conservative proportional controller.  It reacts quickly
+            // enough for launch/descent work but never oscillates between zero and full
+            // throttle when the target is reached.
+            double correction = error / Math.Max(25d, keepSpeedTarget * 0.35d);
+            double targetThrottle = Mathf.Clamp01((float)(throttle + correction * Math.Max(0.05d, deltaTime)));
+            if (Math.Abs(error) <= Math.Max(1d, keepSpeedTarget * 0.01d))
+                targetThrottle = Mathf.Clamp01(throttle * 0.85f);
+            throttle = Mathf.Clamp01((float)targetThrottle);
+            IsControllingThrottle = true;
+            SetAutopilot(VesselAutopilot.AutopilotMode.Prograde);
+            Status = "Keeping " + keepSpeedTarget.ToString("0.##") + "m/s (" + actual.ToString("0.##") + ").";
+        }
+
+        private double ReadSpeedForMode(string mode)
+        {
+            if (vessel == null)
+                return 0d;
+            if (mode == "ORBITAL" && vessel.orbit != null)
+                return vessel.obt_velocity.magnitude;
+            if (mode == "VERTICAL")
+                return vessel.verticalSpeed;
+            return vessel.srfSpeed;
+        }
+
         private void TickGravityTurn(float deltaTime)
         {
             if (vessel == null || gravityTurnProfile == null)
@@ -1306,11 +1375,27 @@ namespace KSPSOS
             double altitude = Math.Max(0d, vessel.altitude);
             double speed = Math.Max(0d, vessel.srfSpeed);
             double apoapsis = vessel.orbit == null ? 0d : vessel.orbit.ApA;
+            double localGravity = LocalGravity();
+            double currentMass = Math.Max(0.01d, vessel.totalMass);
+            double currentThrust = CurrentStageThrust();
+            double twr = currentThrust <= 0d ? 0d : currentThrust / (currentMass * localGravity);
+            double stageDeltaV = CurrentStageDeltaV();
 
-            if (altitude < gravityTurnProfile.TurnStartAltitude)
+            gravityTurnLogTimer -= Mathf.Max(0f, deltaTime);
+            if (gravityTurnLogTimer <= 0f)
+            {
+                gravityTurnLogTimer = 5f;
+                AddLog("GRAVTURN telemetry: mass " + currentMass.ToString("0.00") + "t, TWR " + twr.ToString("0.00") + ", stage dV " + stageDeltaV.ToString("0") + "m/s.");
+            }
+
+            double dynamicTurnStart = gravityTurnProfile.TurnStartAltitude;
+            if (twr > 0.05d)
+                dynamicTurnStart *= Math.Max(0.65d, Math.Min(1.35d, 1.15d - (twr - 1.25d) * 0.18d));
+
+            if (altitude < dynamicTurnStart)
             {
                 pitchInput = 0f;
-                throttle = 1f;
+                throttle = ThrottleForTwr(twr, 1.25d);
                 return;
             }
 
@@ -1331,8 +1416,14 @@ namespace KSPSOS
                 double pitchFraction = gravityTurnProfile.InitialPitchSeconds <= 0d
                     ? 1d
                     : Math.Min(1d, gravityTurnElapsed / gravityTurnProfile.InitialPitchSeconds);
-                pitchInput = gravityTurnProfile.InitialPitchInput * (float)(1d - pitchFraction);
-                throttle = 1f;
+                // High-TWR vehicles can turn earlier; low-TWR vehicles retain more
+                // vertical speed.  The stage dV estimate prevents an almost-empty
+                // stage from wasting the last propellant on excessive steering.
+                double twrTurnBias = Math.Max(-0.25d, Math.Min(0.25d, (twr - 1.35d) * 0.08d));
+                double dVProtection = stageDeltaV > 0d && stageDeltaV < 350d ? 0.65d : 1d;
+                double pitchAuthority = 1d + Math.Max(-0.25d, Math.Min(0.25d, (twr - 1.25d) * 0.12d));
+                pitchInput = gravityTurnProfile.InitialPitchInput * (float)((1d - pitchFraction) * dVProtection * pitchAuthority);
+                throttle = ThrottleForTwr(twr, 1.25d + twrTurnBias);
             }
 
             if (apoapsis >= gravityTurnProfile.TargetApoapsis)
@@ -1388,6 +1479,17 @@ namespace KSPSOS
                     }
                 }
 
+                if (gravityTurnAutoCircularize)
+                {
+                    gravityTurnProfile = null;
+                    circularBurnStarted = false;
+                    circularTargetAltitude = gravityTurnCircularizeAltitude;
+                    state = RuntimeState.WaitingForApoapsis;
+                    Status = "Gravity turn complete; waiting to circularize at " + circularTargetAltitude.ToString("0") + "m.";
+                    AddLog("GRAVTURN: automatic circularization queued.");
+                    return;
+                }
+
                 state = RuntimeState.Idle;
                 if (!gravityCommandAlreadyAdvanced)
                     commandIndex++;
@@ -1397,10 +1499,63 @@ namespace KSPSOS
                 return;
             }
 
-            if (apoapsis > gravityTurnProfile.TargetApoapsis * 0.9)
-                throttle = 0.35f;
+            double apoapsisError = gravityTurnProfile.TargetApoapsis - apoapsis;
+            if (apoapsisError < gravityTurnProfile.TargetApoapsis * 0.1d)
+                throttle = Mathf.Min(throttle, Mathf.Clamp01((float)(apoapsisError / Math.Max(1d, gravityTurnProfile.TargetApoapsis * 0.1d))));
             else
-                throttle = 1f;
+                throttle = ThrottleForTwr(twr, 1.25d);
+
+            if (HasModule("AUTOSTAGE") && !HasModule("MANUALSTAGE") && stageDeltaV > 0d && stageDeltaV < 5d && vessel.currentStage > 0)
+            {
+                Stage();
+                AddLog("GRAVTURN: staged on low remaining stage dV (" + stageDeltaV.ToString("0.0") + "m/s).");
+            }
+        }
+
+        private double LocalGravity()
+        {
+            if (vessel == null || vessel.mainBody == null)
+                return 9.81d;
+            double radius = Math.Max(1d, vessel.mainBody.Radius + Math.Max(0d, vessel.altitude));
+            return vessel.mainBody.gravParameter / (radius * radius);
+        }
+
+        private float ThrottleForTwr(double twr, double desiredTwr)
+        {
+            if (twr <= 0.05d)
+                return 1f;
+            double output = desiredTwr / twr;
+            return Mathf.Clamp((float)output, 0.35f, 1f);
+        }
+
+        private double CurrentStageThrust()
+        {
+            if (vessel == null || vessel.parts == null)
+                return 0d;
+            double thrust = 0d;
+            foreach (Part part in vessel.parts)
+            {
+                if (part == null || part.inverseStage != vessel.currentStage || part.Modules == null)
+                    continue;
+                foreach (PartModule module in part.Modules)
+                {
+                    ModuleEngines engine = module as ModuleEngines;
+                    if (engine == null || !engine.isOperational)
+                        continue;
+                    thrust += Math.Max(0d, engine.maxThrust);
+                }
+            }
+            // ModuleEngines reports thrust in kN and Vessel.totalMass in tonnes;
+            // those prefixes cancel in the TWR ratio (kN / (t*m/s^2)).
+            return thrust;
+        }
+
+        private double CurrentStageDeltaV()
+        {
+            if (vessel == null || vessel.VesselDeltaV == null)
+                return 0d;
+            DeltaVStageInfo stage = vessel.VesselDeltaV.GetStage(vessel.currentStage);
+            return stage == null ? 0d : Math.Max(0d, stage.deltaVActual);
         }
 
         private bool PlanTransferNode(string bodyName)
@@ -1772,7 +1927,7 @@ namespace KSPSOS
 
         private void ApplyAutoStage()
         {
-            if (vessel == null || throttle < 0.05f || vessel.currentStage <= 0)
+            if (HasModule("MANUALSTAGE") || vessel == null || throttle < 0.05f || vessel.currentStage <= 0)
                 return;
             if (Time.time - lastAutoStageTime < 1f)
                 return;

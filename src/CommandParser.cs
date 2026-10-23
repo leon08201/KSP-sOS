@@ -23,6 +23,7 @@ namespace KSPSOS
         Using,
         Rcs,
         GravTurn,
+        KeepSpeed,
         PolarOrbit,
         Hohmann,
         Transfer,
@@ -97,7 +98,8 @@ namespace KSPSOS
         private static readonly HashSet<string> Modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "AUTOSTAGE", "CLEARSKIES", "AUTOWARP", "MAXSCIENCE", "SCIENCE",
-            "SAFEABORT", "SMARTRCS", "AUTOLAND", "RENDEZVOUS", "DOCKING", "RECOVERY"
+            "SAFEABORT", "SMARTRCS", "AUTOLAND", "RENDEZVOUS", "DOCKING", "RECOVERY",
+            "CTRLOCK", "MANUALSTAGE"
         };
 
         public static List<ScriptCommand> Parse(string source, List<string> errors)
@@ -109,7 +111,8 @@ namespace KSPSOS
                 return result;
             }
 
-            source = ExpandInlineBraces(source.Replace("\r", ""));
+            source = ExpandGravityTurnBlocks(source.Replace("\r", ""));
+            source = ExpandInlineBraces(source);
             string[] lines = source.Split('\n');
             var ifStack = new Stack<int>();
             var elseStack = new Stack<int>();
@@ -130,7 +133,8 @@ namespace KSPSOS
 
                 bool closesBlock = trimmed == "}" || trimmed == "};";
                 bool opensBlock = trimmed.EndsWith("{", StringComparison.Ordinal);
-                if (!closesBlock && !opensBlock && !trimmed.EndsWith(";", StringComparison.Ordinal))
+                bool hasSemicolon = trimmed.EndsWith(";", StringComparison.Ordinal);
+                if (!closesBlock && !opensBlock && blockStack.Count == 0 && !hasSemicolon)
                 {
                     errors.Add("Line " + (i + 1) + ": every command must end with ';'.");
                     continue;
@@ -169,9 +173,9 @@ namespace KSPSOS
                     continue;
                 }
 
-                line = opensBlock
+                line = (opensBlock || hasSemicolon)
                     ? trimmed.Substring(0, trimmed.Length - 1).Trim()
-                    : trimmed.Substring(0, trimmed.Length - 1).Trim();
+                    : trimmed;
                 List<string> tokens = Tokens(line);
                 if (tokens.Count == 0)
                     continue;
@@ -213,6 +217,11 @@ namespace KSPSOS
                         if (!ReadGravityTurn(tokens, parsed, errors))
                             continue;
                         break;
+                    case "KEEP":
+                        parsed.Kind = CommandKind.KeepSpeed;
+                        if (!ReadKeepSpeed(tokens, parsed, errors))
+                            continue;
+                        break;
                     case "POLAR":
                         parsed.Kind = CommandKind.PolarOrbit;
                         if (!ReadPolarOrbit(tokens, parsed, errors))
@@ -228,6 +237,7 @@ namespace KSPSOS
                         if (!ReadTransfer(tokens, parsed, errors))
                             continue;
                         break;
+                    case "EXEC":
                     case "EXECUTE":
                         parsed.Kind = CommandKind.ExecuteNode;
                         if (!ReadExecute(tokens, parsed, errors))
@@ -490,6 +500,20 @@ namespace KSPSOS
             return string.Join("\n", expandedLines.ToArray());
         }
 
+        private static string ExpandGravityTurnBlocks(string source)
+        {
+            return Regex.Replace(source,
+                @"(?im)^\s*GRAVTURN(?:\s+(POLAR|EQUATORIAL))?(?:\s+([A-Za-z0-9_*]+))?\s*\{\s*AUTOCIRC(?:\s+([^\s}]+))?\s*\}\s*;?\s*(#.*)?$",
+                match =>
+                {
+                    string mode = match.Groups[1].Success ? match.Groups[1].Value + " " : string.Empty;
+                    string body = match.Groups[2].Success ? match.Groups[2].Value + " " : string.Empty;
+                    string altitude = match.Groups[3].Success ? match.Groups[3].Value : "80KM";
+                    string comment = match.Groups[4].Success ? " " + match.Groups[4].Value : string.Empty;
+                    return "GRAVTURN " + mode + body + "AUTOCIRC " + altitude + ";" + comment;
+                });
+        }
+
         private static bool ReadLaunch(List<string> tokens, ScriptCommand command, List<string> errors)
         {
             if (tokens.Count < 5 || !tokens[1].Equals("TO", StringComparison.OrdinalIgnoreCase) ||
@@ -708,24 +732,87 @@ namespace KSPSOS
 
         private static bool ReadGravityTurn(List<string> tokens, ScriptCommand command, List<string> errors)
         {
-            if (tokens.Count == 2)
+            int index = 1;
+            command.Polar = false;
+            if (tokens.Count > index &&
+                (tokens[index].Equals("POLAR", StringComparison.OrdinalIgnoreCase) ||
+                 tokens[index].Equals("EQUATORIAL", StringComparison.OrdinalIgnoreCase)))
             {
-                command.Body = tokens[1].ToUpperInvariant();
-                command.Polar = false;
-                return true;
+                command.Polar = tokens[index].Equals("POLAR", StringComparison.OrdinalIgnoreCase);
+                index++;
             }
 
-            if (tokens.Count == 3 &&
-                (tokens[1].Equals("POLAR", StringComparison.OrdinalIgnoreCase) ||
-                 tokens[1].Equals("EQUATORIAL", StringComparison.OrdinalIgnoreCase)))
+            if (tokens.Count <= index)
             {
-                command.Body = tokens[2].ToUpperInvariant();
-                command.Polar = tokens[1].Equals("POLAR", StringComparison.OrdinalIgnoreCase);
-                return true;
+                errors.Add("Line " + command.Line + ": use GRAVTURN BODY or GRAVTURN BODY { AUTOCIRC 80KM }.");
+                return false;
             }
 
-            errors.Add("Line " + command.Line + ": use GRAVTURN BODY; or GRAVTURN POLAR BODY;.");
-            return false;
+            if (tokens[index].Equals("AUTOCIRC", StringComparison.OrdinalIgnoreCase))
+            {
+                command.Body = string.Empty;
+            }
+            else
+            {
+                command.Body = tokens[index].ToUpperInvariant();
+                index++;
+            }
+
+            if (tokens.Count == index)
+                return true;
+
+            if (!tokens[index].Equals("AUTOCIRC", StringComparison.OrdinalIgnoreCase) || tokens.Count > index + 2)
+            {
+                errors.Add("Line " + command.Line + ": use GRAVTURN BODY { AUTOCIRC 80KM }.");
+                return false;
+            }
+
+            command.HasTargetAltitude = true;
+            command.Number = 80000f;
+            if (tokens.Count == index + 2 && !TryParseDistance(tokens[index + 1], out command.Number))
+            {
+                errors.Add("Line " + command.Line + ": AUTOCIRC altitude must be a distance such as 80KM.");
+                return false;
+            }
+            return true;
+        }
+
+        private static bool ReadKeepSpeed(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count < 3 || !tokens[1].Equals("SPEED", StringComparison.OrdinalIgnoreCase) || tokens.Count > 4)
+            {
+                errors.Add("Line " + command.Line + ": use KEEP SPEED VALUE; or KEEP SPEED SURFACE VALUE;.");
+                return false;
+            }
+
+            int valueIndex = 2;
+            command.Mode = "SURFACE";
+            if (tokens.Count == 4)
+            {
+                string mode = tokens[2].ToUpperInvariant();
+                if (mode != "SURFACE" && mode != "ORBITAL" && mode != "VERTICAL")
+                {
+                    errors.Add("Line " + command.Line + ": KEEP SPEED mode must be SURFACE, ORBITAL, or VERTICAL.");
+                    return false;
+                }
+                command.Mode = mode;
+                valueIndex = 3;
+            }
+
+            string value = tokens[valueIndex].ToUpperInvariant();
+            if (value.EndsWith("M/S", StringComparison.Ordinal))
+                value = value.Substring(0, value.Length - 3);
+            else if (value.EndsWith("MS", StringComparison.Ordinal))
+                value = value.Substring(0, value.Length - 2);
+            float speed;
+            if (!float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out speed) ||
+                float.IsNaN(speed) || float.IsInfinity(speed) || speed < 0f)
+            {
+                errors.Add("Line " + command.Line + ": speed must be a non-negative value such as 250M/S.");
+                return false;
+            }
+            command.Number = speed;
+            return true;
         }
 
         private static bool ReadPolarOrbit(List<string> tokens, ScriptCommand command, List<string> errors)
@@ -766,9 +853,11 @@ namespace KSPSOS
 
         private static bool ReadExecute(List<string> tokens, ScriptCommand command, List<string> errors)
         {
+            if (tokens.Count == 1)
+                return true;
             if (tokens.Count != 2 || !tokens[1].Equals("NODE", StringComparison.OrdinalIgnoreCase))
             {
-                errors.Add("Line " + command.Line + ": use EXECUTE NODE;.");
+                errors.Add("Line " + command.Line + ": use EXEC; or EXECUTE NODE;.");
                 return false;
             }
             return true;
@@ -836,7 +925,7 @@ namespace KSPSOS
         {
             if (tokens.Count != 2 || !Modules.Contains(tokens[1]))
             {
-                errors.Add("Line " + command.Line + ": unknown module. Available modules are AUTOSTAGE, CLEARSKIES, AUTOWARP, MAXSCIENCE, SAFEABORT, SMARTRCS, AUTOLAND, RENDEZVOUS, DOCKING, and RECOVERY.");
+                errors.Add("Line " + command.Line + ": unknown module. Available modules are AUTOSTAGE, MANUALSTAGE, CTRLOCK, CLEARSKIES, AUTOWARP, MAXSCIENCE, SAFEABORT, SMARTRCS, AUTOLAND, RENDEZVOUS, DOCKING, and RECOVERY.");
                 return false;
             }
 
