@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/KSP-1.8--1.12.5-4e9f3d?style=for-the-badge" alt="KSP 1.8 to 1.12.5">
+  <img src="https://img.shields.io/badge/KSP-1.12.5-4e9f3d?style=for-the-badge" alt="KSP 1.12.5">
   <img src="https://img.shields.io/badge/status-early%20alpha-d99000?style=for-the-badge" alt="Early alpha">
   <img src="https://img.shields.io/badge/license-MIT-236ad3?style=for-the-badge" alt="MIT License">
 </p>
@@ -22,7 +22,7 @@ STAGE;
 CIRC;
 ```
 
-> **Project status:** KSP-sOS is an early-alpha prototype. The terminal, parser, staging, attitude control, RCS toggles, conditions, telemetry waits, gravity-turn profiles, approximate transfers, and assisted rendezvous/docking controls are implemented. Test flight programs with a recoverable save.
+> **Project status:** KSP-sOS is an early-alpha prototype for KSP 1.12.5. The script editor, parser, staging, attitude control, RCS toggles, conditions, telemetry waits, adaptive gravity turns, feasibility checks, approximate transfers, and assisted rendezvous/docking controls are implemented. Test flight programs with a recoverable save.
 
 KSP-sOS is an independent community project and is not affiliated with Squad or Private Division.
 
@@ -72,7 +72,7 @@ The active vessel must be controllable. KSP-sOS does not include or replace KSP'
 
 ## Using the in-game terminal
 
-The terminal has one main mission-script editor. Click the editor, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line, or **SAVE SCRIPT** to save it explicitly. Editing is not saved automatically.
+The terminal has one main mission-script editor. Click the editor, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line, or **SAVE SCRIPT** to save it explicitly. Editing is never saved automatically.
 
 ```text
 LAUNCH;
@@ -88,6 +88,14 @@ This area shows status messages, parser errors, staging, circularization, module
 
 Press **STOP** to halt a running program, and press **F8** again to hide the terminal.
 
+### Check if possible
+
+Press **CHECK IF POSSIBLE** before running a script to perform a non-controlling preflight check. It validates the script and reports the active vessel's mass, every detected stage's TWR, stage delta-v, burn time, total delta-v, body mismatches, and missing orbit or maneuver-planning data. The check is advisory: it does not guarantee a successful mission and does not change the vessel.
+
+### Camera, pause, and compact mode
+
+The terminal does not lock the camera or pause controls. Clicking outside the terminal only removes editor focus; it does not close the window. Right-click the terminal window to toggle compact mode, which hides the templates, syntax preview, output, and script library while keeping the editor and controls available. `using ctrlock;` locks vessel controls only while a script is running.
+
 ### Script library
 
 The bottom of the terminal has two script-library controls:
@@ -95,7 +103,7 @@ The bottom of the terminal has two script-library controls:
 - **WRITE NEW SCRIPT** clears the program editor and starts a new saved `.kspsos` file.
 - **REUSE SCRIPT** loads saved scripts from the library; press it again to cycle through older files.
 
-Scripts are auto-saved while you edit and are stored at:
+Scripts are saved only when **SAVE SCRIPT** is pressed and are stored at:
 
 ```text
 GameData/KSPsOS/PluginData/Scripts/
@@ -342,6 +350,8 @@ GRAVTURN KERBIN { AUTOCIRC 100KM }
 GRAVTURN { AUTOCIRC }
 ```
 
+Use `GRAVTURN AUTO;` to select the active vessel's current body automatically without requesting automatic circularization. `GRAVTURN AUTO { AUTOCIRC 80KM }` is also accepted.
+
 During flight the controller continuously reads vessel mass, local gravity, live engine thrust, current-stage delta-v, TWR, speed, and apoapsis error. It uses those values to choose throttle, soften the pitch program for low-delta-v stages, stage only when allowed by the active modules, and taper thrust as the target apoapsis is approached. The profiles remain safe starting envelopes because no generic controller can predict every vehicle's drag, steering authority, or engine layout.
 
 `KEEP SPEED` holds a target speed with a bounded feedback controller. It is intentionally a blocking command until `STOP` is pressed or the script is stopped:
@@ -369,7 +379,7 @@ This command currently **plans the node but does not execute the burn**. Plane c
 
 ### `EXEC;` and `EXECUTE NODE;`
 
-Executes the next maneuver node in the vessel's KSP maneuver list. KSP's maneuver autopilot controls attitude while KSP-sOS estimates burn duration from the vessel's current delta-v and burn-time data, applies a bounded full-throttle burn, and removes the node when the burn completes:
+Executes the next planned maneuver node in the vessel's KSP maneuver list, whether the node was created by KSP-sOS or placed manually by the player. KSP's maneuver autopilot controls attitude while KSP-sOS estimates burn duration from the vessel's current delta-v and burn-time data, applies a bounded full-throttle burn, and removes the node when the burn completes:
 
 ```text
 using autowarp;
@@ -635,7 +645,7 @@ STAGE;
 The current KSP-sOS version supports:
 
 - Sequential scripts.
-- Interactive terminal commands.
+- Single multi-line mission-script editor with explicit save controls and mission templates.
 - Throttle control.
 - Staging.
 - SAS/autopilot attitude modes.
@@ -656,6 +666,7 @@ The current KSP-sOS version supports:
 - Body-specific gravity-turn presets through `GRAVTURN <body>;`.
 - Live gravity-turn adaptation using vessel mass, thrust-to-weight ratio, active-stage delta-v, apoapsis error, and speed feedback.
 - Target-speed feedback control through `KEEP SPEED`.
+- Preflight feasibility checks through the `CHECK IF POSSIBLE` button. The check reports parser errors, vessel mass, per-stage TWR, per-stage and total delta-v, burn time, body mismatches, and missing orbit/maneuver data without running the script or controlling the vessel.
 - Equatorial-by-default ascent and opt-in polar ascent/arrival through `GRAVTURN POLAR <body>;` and `POLAR ORBIT AROUND <body>;`.
 - Approximate local and interplanetary transfer-node planning through `HOHMANN TO <body>;` and `TRANSFER TO <body>;`.
 - Long-mission transfer continuation: after an executed transfer, `LAND ON <body>;` waits for destination sphere-of-influence entry before starting descent guidance.
@@ -683,10 +694,11 @@ The scripting engine is still an early alpha. A successful build and parser test
 
 ### I cannot type in the terminal
 
-- Click inside the **Terminal input** line, then type `PRINT hello;` and press Enter. The typed characters should appear beside `>`.
-- Make sure the terminal is open with **F8** and that the game is paused only if your KSP setup still delivers GUI input while paused.
-- If the line still does not receive keys, press **F8** to close and reopen the terminal, then click the line again.
-- Check `KSP.log` for `[KSP-sOS] Flight terminal loaded`. If it is absent, the DLL is not loading; if an error follows it, include the error when reporting the issue.
+- Open the terminal with **F8** in a Flight scene.
+- Click inside the main mission-script editor, then type or paste the complete program.
+- Review parser diagnostics below the syntax preview before pressing **RUN PROGRAM**.
+- If the editor is not responding, press **F8** to close and reopen the terminal.
+- Check `KSP.log` for plugin-loading errors if the terminal does not appear.
 
 ### A command reports an error
 
@@ -714,7 +726,7 @@ The repository includes the source, project file, a prebuilt drag-and-drop packa
 ### Validation status
 
 - The source compiles against the installed KSP 1.12.5 assemblies.
-- Parser smoke tests cover semicolon enforcement, braces, distance units, science modes, mission commands, and malformed-argument diagnostics.
+- Parser smoke tests cover semicolon enforcement, optional semicolons inside braces, distance units, gravity-turn autocircularization, `KEEP SPEED`, science modes, mission commands, modules, and malformed-argument diagnostics.
 - The drag-and-drop archive contains only `GameData/KSPsOS` and passes ZIP integrity testing.
 - A complete live KSP flight has not been automated in this repository, so ascent, transfer, landing, science-transmission, and docking controllers remain early-alpha and should be tested in a throwaway save.
 
@@ -764,6 +776,9 @@ KSP-sOS is released under the [MIT License](LICENSE).
 | `src/CommandParser.cs` | Reads semicolon-terminated commands, modules, and control-flow blocks. |
 | `src/FlightScriptRuntime.cs` | Executes commands, modules, and vessel telemetry logic. |
 | `src/KSPsOSAddon.cs` | Creates the in-game terminal and connects flight controls. |
+| `build.sh` | Builds the portable KSP 1.12.5 plugin against local KSP assemblies. |
 | `GameData/KSPsOS/KSPsOS.version` | KSP-AVC version metadata. |
 | `GameData/KSPsOS/Plugins/KSPsOS.dll` | Compiled plugin used by KSP. |
+| `KSP-sOS-ready-to-install/` | Ready-to-copy `GameData` folder containing the current DLL. |
+| `KSP-sOS-drag-and-drop.zip` | Packaged archive containing the mod's `GameData/KSPsOS` files. |
 | `tests/ParserSmoke.cs` | Parser and diagnostic smoke test used during development. |
