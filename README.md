@@ -43,9 +43,23 @@ KSP-sOS is an independent community project and is not affiliated with Squad or 
 
 ## Install the drag-and-drop package
 
+You can install KSP-sOS either from the ZIP or from the ready-to-copy folder included in the repository.
+
+### Ready-to-copy folder
+
+1. Open `KSP-sOS-ready-to-install`.
+2. Drag its `GameData` folder into your KSP installation folder and choose **Merge** if your file manager asks.
+3. Confirm that this file exists:
+
+   ```text
+   Kerbal Space Program/GameData/KSPsOS/Plugins/KSPsOS.dll
+   ```
+
+### ZIP package
+
 1. Download `KSP-sOS-drag-and-drop.zip`.
 2. Extract it directly into your KSP installation folder.
-3. Confirm that this file exists:
+3. Confirm that the same `GameData/KSPsOS/Plugins/KSPsOS.dll` file exists:
 
    ```text
    Kerbal Space Program/GameData/KSPsOS/Plugins/KSPsOS.dll
@@ -682,7 +696,7 @@ Check that:
 
 ## Build from source
 
-The repository includes the source, project file, and a prebuilt drag-and-drop package. To build a fresh DLL, compile against the KSP assemblies from your local installation. KSP's own assemblies should remain in the game installation and should not be copied into `GameData`.
+The repository includes the source, project file, a prebuilt drag-and-drop package, and a ready-to-copy installation folder. To build a fresh DLL, compile against the KSP assemblies from your local installation. KSP's own assemblies should remain in the game installation and should not be copied into `GameData`.
 
 ### Validation status
 

@@ -6,7 +6,10 @@ using UnityEngine;
 
 namespace KSPSOS
 {
-    [KSPAddon(KSPAddon.Startup.Flight, false)]
+    // Register for every scene and gate the UI/runtime ourselves.  This keeps
+    // the terminal alive through save loading and scene transitions instead of
+    // relying on Flight's one-shot scene callback to discover the addon.
+    [KSPAddon(KSPAddon.Startup.EveryScene, false)]
     public sealed class KSPsOSAddon : MonoBehaviour
     {
         private readonly FlightScriptRuntime runtime = new FlightScriptRuntime();
@@ -23,6 +26,7 @@ namespace KSPSOS
         private bool terminalInputActive;
         private bool programEditorActive;
         private int programCursor;
+        private int lastF8ToggleFrame = -1;
         private bool terminalControlLockActive;
         private Rect terminalInputRect;
         private string scriptsDirectory;
@@ -46,19 +50,24 @@ namespace KSPSOS
             runtime.SetVessel(FlightGlobals.ActiveVessel);
             scriptsDirectory = Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "KSPsOS", "PluginData", "Scripts");
             EnsureScriptDirectory();
-            Debug.Log("[KSP-sOS] Flight terminal loaded. Press F8 to open it.");
+            Debug.Log("[KSP-sOS] Addon loaded in " + HighLogic.LoadedScene + ". Press F8 in Flight to open the terminal.");
         }
 
         private void Update()
         {
             if (Input.GetKeyDown(KeyCode.F8))
+                ToggleTerminal();
+
+            if (HighLogic.LoadedScene != GameScenes.FLIGHT)
             {
-                visible = !visible;
-                focusTerminalOnOpen = visible;
-                terminalInputActive = visible;
+                visible = false;
+                terminalInputActive = false;
+                programEditorActive = false;
+                SetTerminalControlLock(false);
+                return;
             }
 
-            SetTerminalControlLock(visible && HighLogic.LoadedScene == GameScenes.FLIGHT);
+            SetTerminalControlLock(visible);
 
             Vessel activeVessel = FlightGlobals.ActiveVessel;
             if (activeVessel != subscribedVessel)
@@ -115,18 +124,21 @@ namespace KSPSOS
 
         private void OnGUI()
         {
-            if (!visible || HighLogic.LoadedScene != GameScenes.FLIGHT)
-                return;
-
-            // Input.GetKeyDown may be masked by KSP's flight-control lock.
-            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.F8)
+            // Input.GetKeyDown is normally sufficient, but KSP's input locks
+            // can prevent it from seeing a key on the same frame.  Mirror the
+            // terminal's raw-event fallback while de-duplicating Update() so
+            // F8 never opens and closes the window in one frame.
+            if (HighLogic.LoadedScene == GameScenes.FLIGHT &&
+                Event.current.type == EventType.KeyDown &&
+                Event.current.keyCode == KeyCode.F8)
             {
-                visible = false;
-                terminalInputActive = false;
-                SetTerminalControlLock(false);
+                ToggleTerminal();
                 Event.current.Use();
                 return;
             }
+
+            if (!visible || HighLogic.LoadedScene != GameScenes.FLIGHT)
+                return;
 
             // Match kOS's behavior: the active terminal owns keyboard/control input
             // while it is open, then releases it as soon as it is hidden.
@@ -158,6 +170,19 @@ namespace KSPSOS
             }
 
             windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, "KSP-sOS Terminal");
+        }
+
+        private void ToggleTerminal()
+        {
+            if (lastF8ToggleFrame == Time.frameCount)
+                return;
+
+            lastF8ToggleFrame = Time.frameCount;
+            visible = !visible;
+            focusTerminalOnOpen = visible;
+            terminalInputActive = visible;
+            if (!visible)
+                programEditorActive = false;
         }
 
         private void SetTerminalControlLock(bool locked)
