@@ -426,7 +426,10 @@ namespace KSPSOS
                     int lineStart = ProgramLineStart();
                     string precedingLine = script.Substring(lineStart, programCursor - lineStart);
                     string indentation = LeadingWhitespace(precedingLine);
-                    if (precedingLine.TrimEnd().EndsWith("{", StringComparison.Ordinal))
+                    // KSP ships an older Mono runtime that does not expose the
+                    // parameterless String.TrimEnd() method shape.  Use the
+                    // legacy char-array overload so the call resolves in-game.
+                    if (precedingLine.TrimEnd(new[] { ' ', '\t', '\r', '\n' }).EndsWith("{", StringComparison.Ordinal))
                         indentation += EditorIndent;
                     InsertProgramText("\n" + indentation);
                     key.Use();
