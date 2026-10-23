@@ -22,7 +22,23 @@ namespace KSPSOS
         Set,
         Using,
         Rcs,
-        GravTurn
+        GravTurn,
+        PolarOrbit,
+        Hohmann,
+        Transfer,
+        Science,
+        DeploySolarPanels,
+        Distance,
+        LaunchToDock,
+        Rendezvous,
+        DockToTarget,
+        AutoDock,
+        ApolloDock,
+        Land,
+        Recover,
+        WalkInThePark,
+        ExecuteNode,
+        AlignPlane
     }
 
     internal enum ConditionOperator
@@ -41,6 +57,8 @@ namespace KSPSOS
         public bool IsBoolean;
         public bool BooleanValue;
         public bool Negated;
+        public bool IsOrbitState;
+        public bool OrbitSafe;
         public ConditionOperator Operator;
         public float Number;
     }
@@ -54,11 +72,15 @@ namespace KSPSOS
         public string Variable;
         public string Module;
         public string Body;
+        public bool Polar;
+        public string TargetName;
         public bool BoolValue;
+        public bool HasTargetAltitude;
         public int Line;
         public int JumpIndex = -1;
         public string Source;
         public Condition Condition;
+        public bool OpensBlock;
     }
 
     internal static class CommandParser
@@ -87,9 +109,12 @@ namespace KSPSOS
                 return result;
             }
 
-            string[] lines = source.Replace("\r", "").Split('\n');
+            source = ExpandInlineBraces(source.Replace("\r", ""));
+            string[] lines = source.Split('\n');
             var ifStack = new Stack<int>();
             var elseStack = new Stack<int>();
+            var blockStack = new Stack<int>();
+            int lastClosedIf = -1;
             bool executableCommandSeen = false;
 
             for (int i = 0; i < lines.Length; i++)
@@ -103,13 +128,50 @@ namespace KSPSOS
                 if (trimmed.Length == 0)
                     continue;
 
-                if (!trimmed.EndsWith(";", StringComparison.Ordinal))
+                bool closesBlock = trimmed == "}" || trimmed == "};";
+                bool opensBlock = trimmed.EndsWith("{", StringComparison.Ordinal);
+                if (!closesBlock && !opensBlock && !trimmed.EndsWith(";", StringComparison.Ordinal))
                 {
                     errors.Add("Line " + (i + 1) + ": every command must end with ';'.");
                     continue;
                 }
 
-                line = trimmed.Substring(0, trimmed.Length - 1).Trim();
+                if (closesBlock)
+                {
+                    if (blockStack.Count == 0)
+                    {
+                        errors.Add("Line " + (i + 1) + ": unexpected '}'.");
+                        continue;
+                    }
+
+                    int openIndex = blockStack.Pop();
+                    ScriptCommand openCommand = result[openIndex];
+                    if (openCommand.Kind == CommandKind.If)
+                    {
+                        if (ifStack.Count > 0 && ifStack.Peek() == openIndex)
+                            ifStack.Pop();
+                        openCommand.JumpIndex = result.Count + 1;
+                        lastClosedIf = openIndex;
+                    }
+                    else if (openCommand.Kind == CommandKind.Else)
+                    {
+                        if (elseStack.Count > 0 && elseStack.Peek() == openIndex)
+                            elseStack.Pop();
+                        openCommand.JumpIndex = result.Count;
+                    }
+
+                    result.Add(new ScriptCommand
+                    {
+                        Kind = CommandKind.End,
+                        Line = i + 1,
+                        Source = "}"
+                    });
+                    continue;
+                }
+
+                line = opensBlock
+                    ? trimmed.Substring(0, trimmed.Length - 1).Trim()
+                    : trimmed.Substring(0, trimmed.Length - 1).Trim();
                 List<string> tokens = Tokens(line);
                 if (tokens.Count == 0)
                     continue;
@@ -125,9 +187,13 @@ namespace KSPSOS
                 {
                     case "LAUNCH":
                         parsed.Kind = CommandKind.Launch;
+                        if (tokens.Count > 1 && !ReadLaunch(tokens, parsed, errors))
+                            continue;
                         break;
                     case "STAGE":
                         parsed.Kind = CommandKind.Stage;
+                        if (!RequireTokenCount(tokens, 1, parsed, errors, "use STAGE;"))
+                            continue;
                         break;
                     case "HOLD":
                     case "WAIT":
@@ -137,15 +203,106 @@ namespace KSPSOS
                         break;
                     case "CIRC":
                     case "CIRCULARIZE":
+                    case "CIRCULARISE":
                         parsed.Kind = CommandKind.Circ;
+                        if (!ReadCircularize(tokens, parsed, errors))
+                            continue;
                         break;
                     case "GRAVTURN":
                         parsed.Kind = CommandKind.GravTurn;
-                        if (!ReadBody(tokens, parsed, errors))
+                        if (!ReadGravityTurn(tokens, parsed, errors))
                             continue;
+                        break;
+                    case "POLAR":
+                        parsed.Kind = CommandKind.PolarOrbit;
+                        if (!ReadPolarOrbit(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "HOHMANN":
+                        parsed.Kind = CommandKind.Hohmann;
+                        if (!ReadTransfer(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "TRANSFER":
+                        parsed.Kind = CommandKind.Transfer;
+                        if (!ReadTransfer(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "EXECUTE":
+                        parsed.Kind = CommandKind.ExecuteNode;
+                        if (!ReadExecute(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "ALIGN":
+                        parsed.Kind = CommandKind.AlignPlane;
+                        if (!ReadAlignPlane(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "SCIENCE":
+                    case "DO":
+                        parsed.Kind = CommandKind.Science;
+                        if (!ReadScience(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "DEPLOY":
+                        parsed.Kind = CommandKind.DeploySolarPanels;
+                        if (!ReadDeploy(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "DISTANCE":
+                        parsed.Kind = CommandKind.Distance;
+                        if (!ReadDistance(tokens, 1, parsed, errors, "distance"))
+                            continue;
+                        break;
+                    case "*WALK":
+                        parsed.Kind = CommandKind.WalkInThePark;
+                        if (!IsWalkInThePark(tokens))
+                        {
+                            errors.Add("Line " + parsed.Line + ": use *WALK IN THE PARK*;.");
+                            continue;
+                        }
+                        break;
+                    case "RENDEZVOUS":
+                        parsed.Kind = CommandKind.Rendezvous;
+                        if (!ReadRendezvous(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "DOCK":
+                        parsed.Kind = CommandKind.DockToTarget;
+                        if (!ReadDock(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "AUTODOCK":
+                        parsed.Kind = CommandKind.AutoDock;
+                        if (tokens.Count != 1)
+                        {
+                            errors.Add("Line " + parsed.Line + ": use AUTODOCK;.");
+                            continue;
+                        }
+                        break;
+                    case "APOLLO":
+                    case "TRANSPOSE":
+                        parsed.Kind = CommandKind.ApolloDock;
+                        if (!ReadApolloDock(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "LAND":
+                        parsed.Kind = CommandKind.Land;
+                        if (!ReadLand(tokens, parsed, errors))
+                            continue;
+                        break;
+                    case "RECOVER":
+                        parsed.Kind = CommandKind.Recover;
+                        if (tokens.Count != 1)
+                        {
+                            errors.Add("Line " + parsed.Line + ": use RECOVER;.");
+                            continue;
+                        }
                         break;
                     case "THROTTLE":
                         parsed.Kind = CommandKind.Throttle;
+                        if (!RequireTokenCount(tokens, 2, parsed, errors, "use THROTTLE VALUE;"))
+                            continue;
                         if (!ReadNumber(tokens, 1, parsed, errors, "throttle"))
                             continue;
                         if (parsed.Number < 0 || parsed.Number > 100)
@@ -158,6 +315,8 @@ namespace KSPSOS
                         break;
                     case "SAS":
                         parsed.Kind = CommandKind.Sas;
+                        if (!RequireTokenCount(tokens, 2, parsed, errors, "use SAS PG;"))
+                            continue;
                         if (!ReadMode(tokens, 1, parsed, errors))
                             continue;
                         break;
@@ -168,6 +327,8 @@ namespace KSPSOS
                         break;
                     case "ABORT":
                         parsed.Kind = CommandKind.Abort;
+                        if (!RequireTokenCount(tokens, 1, parsed, errors, "use ABORT;"))
+                            continue;
                         break;
                     case "PRINT":
                         parsed.Kind = CommandKind.Print;
@@ -175,18 +336,29 @@ namespace KSPSOS
                         break;
                     case "IF":
                         parsed.Kind = CommandKind.If;
+                        parsed.OpensBlock = opensBlock;
                         if (!ReadCondition(tokens, 1, parsed, errors))
                             continue;
                         ifStack.Push(result.Count);
                         break;
                     case "ELSE":
                         parsed.Kind = CommandKind.Else;
-                        if (ifStack.Count == 0)
+                        parsed.OpensBlock = opensBlock;
+                        if (!RequireTokenCount(tokens, 1, parsed, errors, "use ELSE; or ELSE {"))
+                            continue;
+                        int ifIndex;
+                        if (ifStack.Count > 0)
+                            ifIndex = ifStack.Pop();
+                        else if (lastClosedIf >= 0)
+                        {
+                            ifIndex = lastClosedIf;
+                            lastClosedIf = -1;
+                        }
+                        else
                         {
                             errors.Add("Line " + parsed.Line + ": ELSE has no matching IF.");
                             continue;
                         }
-                        int ifIndex = ifStack.Pop();
                         result[ifIndex].JumpIndex = result.Count + 1;
                         parsed.JumpIndex = ifIndex;
                         elseStack.Push(result.Count);
@@ -194,6 +366,8 @@ namespace KSPSOS
                     case "END":
                     case "ENDIF":
                         parsed.Kind = CommandKind.End;
+                        if (!RequireTokenCount(tokens, 1, parsed, errors, "use END; or ENDIF;"))
+                            continue;
                         if (ifStack.Count > 0)
                         {
                             int openIf = ifStack.Pop();
@@ -207,6 +381,7 @@ namespace KSPSOS
                         break;
                     case "WHEN":
                         parsed.Kind = CommandKind.When;
+                        parsed.OpensBlock = opensBlock;
                         if (!ReadCondition(tokens, 1, parsed, errors))
                             continue;
                         break;
@@ -231,6 +406,16 @@ namespace KSPSOS
                 }
 
                 result.Add(parsed);
+                if (parsed.OpensBlock)
+                {
+                    if (parsed.Kind != CommandKind.If && parsed.Kind != CommandKind.Else && parsed.Kind != CommandKind.When)
+                    {
+                        errors.Add("Line " + parsed.Line + ": only IF, ELSE, and WHEN may open a '{' block.");
+                        result.RemoveAt(result.Count - 1);
+                        continue;
+                    }
+                    blockStack.Push(result.Count - 1);
+                }
                 if (parsed.Kind != CommandKind.Using)
                     executableCommandSeen = true;
             }
@@ -239,6 +424,8 @@ namespace KSPSOS
                 errors.Add("Unclosed IF starting on line " + result[ifStack.Pop()].Line + ".");
             if (elseStack.Count > 0)
                 errors.Add("Unclosed ELSE block.");
+            while (blockStack.Count > 0)
+                errors.Add("Unclosed '{' block starting on line " + result[blockStack.Pop()].Line + ".");
 
             return result;
         }
@@ -253,6 +440,202 @@ namespace KSPSOS
                     tokens.Add(match.Value);
             }
             return tokens;
+        }
+
+        private static string ExpandInlineBraces(string source)
+        {
+            var expandedLines = new List<string>();
+            string[] lines = source.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string original = lines[i];
+                int commentIndex = original.IndexOf('#');
+                string code = commentIndex >= 0 ? original.Substring(0, commentIndex) : original;
+                string comment = commentIndex >= 0 ? original.Substring(commentIndex) : string.Empty;
+                int cursor = 0;
+
+                while (cursor < code.Length)
+                {
+                    int braceIndex = code.IndexOfAny(new[] { '{', '}' }, cursor);
+                    if (braceIndex < 0)
+                        break;
+
+                    string before = code.Substring(cursor, braceIndex - cursor).Trim();
+                    if (code[braceIndex] == '{')
+                    {
+                        expandedLines.Add(before.Length == 0 ? "{" : before + " {");
+                        cursor = braceIndex + 1;
+                        continue;
+                    }
+
+                    if (before.Length > 0)
+                        expandedLines.Add(before);
+
+                    int afterBrace = braceIndex + 1;
+                    while (afterBrace < code.Length && char.IsWhiteSpace(code[afterBrace]))
+                        afterBrace++;
+                    bool hasSemicolon = afterBrace < code.Length && code[afterBrace] == ';';
+                    if (hasSemicolon)
+                        afterBrace++;
+                    expandedLines.Add(hasSemicolon ? "};" : "}");
+                    cursor = afterBrace;
+                }
+
+                string remainder = code.Substring(cursor).Trim();
+                if (remainder.Length > 0)
+                    expandedLines.Add(remainder + comment);
+                else if (comment.Length > 0)
+                    expandedLines.Add(comment);
+            }
+            return string.Join("\n", expandedLines.ToArray());
+        }
+
+        private static bool ReadLaunch(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count < 5 || !tokens[1].Equals("TO", StringComparison.OrdinalIgnoreCase) ||
+                !tokens[2].Equals("DOCK", StringComparison.OrdinalIgnoreCase) ||
+                !tokens[3].Equals("TO", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Line " + command.Line + ": use LAUNCH; or LAUNCH TO DOCK TO VESSEL NAME;.");
+                return false;
+            }
+
+            command.Kind = CommandKind.LaunchToDock;
+            command.TargetName = JoinTokens(tokens, 4);
+            return command.TargetName.Length > 0;
+        }
+
+        private static bool ReadCircularize(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count == 1)
+                return true;
+            if (tokens.Count != 2 || !TryParseDistance(tokens[1], out command.Number))
+            {
+                errors.Add("Line " + command.Line + ": use CIRC; or CIRCULARISE 100KM;.");
+                return false;
+            }
+
+            command.HasTargetAltitude = true;
+            return command.Number > 0f;
+        }
+
+        private static bool ReadDistance(List<string> tokens, int index, ScriptCommand command, List<string> errors, string label)
+        {
+            if (tokens.Count != index + 1 || !TryParseDistance(tokens[index], out command.Number) || command.Number < 0f)
+            {
+                errors.Add("Line " + command.Line + ": use DISTANCE followed by metres, for example DISTANCE 50;.");
+                return false;
+            }
+            return true;
+        }
+
+        private static bool TryParseDistance(string token, out float metres)
+        {
+            metres = 0f;
+            if (string.IsNullOrEmpty(token))
+                return false;
+
+            string value = token.ToUpperInvariant();
+            float multiplier = 1f;
+            if (value.EndsWith("KM", StringComparison.Ordinal))
+            {
+                multiplier = 1000f;
+                value = value.Substring(0, value.Length - 2);
+            }
+            else if (value.EndsWith("M", StringComparison.Ordinal))
+            {
+                value = value.Substring(0, value.Length - 1);
+            }
+
+            float parsed;
+            if (!float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed) || float.IsNaN(parsed))
+                return false;
+            metres = parsed * multiplier;
+            return true;
+        }
+
+        private static bool ReadRendezvous(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count < 3 || !tokens[1].Equals("WITH", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Line " + command.Line + ": use RENDEZVOUS WITH TARGET; or RENDEZVOUS WITH VESSEL NAME;.");
+                return false;
+            }
+            command.TargetName = JoinTokens(tokens, 2);
+            return true;
+        }
+
+        private static bool ReadDock(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count != 3 || !tokens[1].Equals("TO", StringComparison.OrdinalIgnoreCase) ||
+                !tokens[2].Equals("TARGET", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Line " + command.Line + ": use DOCK TO TARGET;.");
+                return false;
+            }
+            return true;
+        }
+
+        private static bool ReadApolloDock(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            bool valid = (tokens.Count == 2 && tokens[0].Equals("APOLLO", StringComparison.OrdinalIgnoreCase) &&
+                          tokens[1].Equals("DOCK", StringComparison.OrdinalIgnoreCase)) ||
+                         (tokens.Count == 2 && tokens[0].Equals("TRANSPOSE", StringComparison.OrdinalIgnoreCase) &&
+                          tokens[1].Equals("DOCK", StringComparison.OrdinalIgnoreCase));
+            bool targeted = tokens.Count == 4 && tokens[0].Equals("APOLLO", StringComparison.OrdinalIgnoreCase) &&
+                            tokens[1].Equals("DOCK", StringComparison.OrdinalIgnoreCase) &&
+                            tokens[2].Equals("TO", StringComparison.OrdinalIgnoreCase) &&
+                            tokens[3].Equals("TARGET", StringComparison.OrdinalIgnoreCase);
+            if (!valid)
+            {
+                if (!targeted)
+                {
+                    errors.Add("Line " + command.Line + ": use APOLLO DOCK;, APOLLO DOCK TO TARGET;, or TRANSPOSE DOCK;.");
+                    return false;
+                }
+            }
+            if (targeted)
+                command.TargetName = "TARGET";
+            if (!valid && !targeted)
+                return false;
+            return true;
+        }
+
+        private static bool ReadLand(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count < 3 || !tokens[1].Equals("ON", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Line " + command.Line + ": use LAND ON BODY;.");
+                return false;
+            }
+            int start = tokens[2].Equals("THE", StringComparison.OrdinalIgnoreCase) ? 3 : 2;
+            if (tokens.Count <= start)
+            {
+                errors.Add("Line " + command.Line + ": LAND needs a celestial body.");
+                return false;
+            }
+            command.Body = JoinTokens(tokens, start).ToUpperInvariant();
+            return true;
+        }
+
+        private static bool IsWalkInThePark(List<string> tokens)
+        {
+            return tokens.Count == 4 && tokens[0].Equals("*WALK", StringComparison.OrdinalIgnoreCase) &&
+                   tokens[1].Equals("IN", StringComparison.OrdinalIgnoreCase) &&
+                   tokens[2].Equals("THE", StringComparison.OrdinalIgnoreCase) &&
+                   tokens[3].Equals("PARK*", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string JoinTokens(List<string> tokens, int start)
+        {
+            string joined = string.Empty;
+            for (int i = start; i < tokens.Count; i++)
+            {
+                if (joined.Length > 0)
+                    joined += " ";
+                joined += tokens[i];
+            }
+            return joined.Trim('*');
         }
 
         private static bool ReadHold(List<string> tokens, ScriptCommand command, List<string> errors)
@@ -271,9 +654,19 @@ namespace KSPSOS
                     command.Number = 1f;
                     return true;
                 }
+                if (tokens.Count != 3)
+                {
+                    errors.Add("Line " + command.Line + ": use HOLD MODE SECONDS;.");
+                    return false;
+                }
                 return ReadNumber(tokens, 2, command, errors, "hold duration");
             }
 
+            if (tokens.Count != 2)
+            {
+                errors.Add("Line " + command.Line + ": use HOLD SECONDS; or HOLD MODE SECONDS;.");
+                return false;
+            }
             return ReadNumber(tokens, 1, command, errors, "hold duration");
         }
 
@@ -313,6 +706,132 @@ namespace KSPSOS
             return true;
         }
 
+        private static bool ReadGravityTurn(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count == 2)
+            {
+                command.Body = tokens[1].ToUpperInvariant();
+                command.Polar = false;
+                return true;
+            }
+
+            if (tokens.Count == 3 &&
+                (tokens[1].Equals("POLAR", StringComparison.OrdinalIgnoreCase) ||
+                 tokens[1].Equals("EQUATORIAL", StringComparison.OrdinalIgnoreCase)))
+            {
+                command.Body = tokens[2].ToUpperInvariant();
+                command.Polar = tokens[1].Equals("POLAR", StringComparison.OrdinalIgnoreCase);
+                return true;
+            }
+
+            errors.Add("Line " + command.Line + ": use GRAVTURN BODY; or GRAVTURN POLAR BODY;.");
+            return false;
+        }
+
+        private static bool ReadPolarOrbit(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count == 2 && tokens[1].Equals("ORBIT", StringComparison.OrdinalIgnoreCase))
+            {
+                command.Body = string.Empty;
+                return true;
+            }
+
+            if (tokens.Count >= 4 && tokens[1].Equals("ORBIT", StringComparison.OrdinalIgnoreCase) &&
+                tokens[2].Equals("AROUND", StringComparison.OrdinalIgnoreCase))
+            {
+                command.Body = JoinTokens(tokens, 3).ToUpperInvariant();
+                return command.Body.Length > 0;
+            }
+
+            errors.Add("Line " + command.Line + ": use POLAR ORBIT; or POLAR ORBIT AROUND BODY;.");
+            return false;
+        }
+
+        private static bool ReadTransfer(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            bool validShortForm = tokens.Count == 3 &&
+                                  tokens[1].ToUpperInvariant() == "TO";
+            bool validCelestialBodyForm = tokens.Count == 4 &&
+                                          tokens[1].ToUpperInvariant() == "TO" &&
+                                          tokens[2].ToUpperInvariant() == "CB";
+            if (!validShortForm && !validCelestialBodyForm)
+            {
+                errors.Add("Line " + command.Line + ": use HOHMANN TO BODY or TRANSFER TO CB BODY.");
+                return false;
+            }
+
+            command.Body = tokens[tokens.Count - 1].ToUpperInvariant();
+            return true;
+        }
+
+        private static bool ReadExecute(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count != 2 || !tokens[1].Equals("NODE", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Line " + command.Line + ": use EXECUTE NODE;.");
+                return false;
+            }
+            return true;
+        }
+
+        private static bool ReadAlignPlane(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            if (tokens.Count != 4 || !tokens[1].Equals("PLANE", StringComparison.OrdinalIgnoreCase) ||
+                !tokens[2].Equals("TO", StringComparison.OrdinalIgnoreCase) ||
+                !tokens[3].Equals("TARGET", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("Line " + command.Line + ": use ALIGN PLANE TO TARGET;.");
+                return false;
+            }
+            return true;
+        }
+
+        private static bool ReadScience(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            int modeIndex = tokens[0].Equals("DO", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
+            if (tokens[0].Equals("DO", StringComparison.OrdinalIgnoreCase) && (tokens.Count < 2 || !tokens[1].Equals("SCIENCE", StringComparison.OrdinalIgnoreCase)))
+            {
+                errors.Add("Line " + command.Line + ": use DO SCIENCE or SCIENCE AUTO.");
+                return false;
+            }
+
+            if (tokens.Count <= modeIndex)
+            {
+                command.Mode = "AUTO";
+                return true;
+            }
+
+            if (tokens.Count != modeIndex + 1)
+            {
+                errors.Add("Line " + command.Line + ": use SCIENCE AUTO, SCIENCE COLLECT, or SCIENCE TRANSMIT.");
+                return false;
+            }
+
+            string mode = tokens[modeIndex].ToUpperInvariant();
+            if (mode != "AUTO" && mode != "COLLECT" && mode != "TRANSMIT")
+            {
+                errors.Add("Line " + command.Line + ": use SCIENCE AUTO, SCIENCE COLLECT, or SCIENCE TRANSMIT.");
+                return false;
+            }
+            command.Mode = mode;
+            return true;
+        }
+
+        private static bool ReadDeploy(List<string> tokens, ScriptCommand command, List<string> errors)
+        {
+            bool solarPanels = tokens.Count == 3 &&
+                               tokens[1].Equals("SOLAR", StringComparison.OrdinalIgnoreCase) &&
+                               tokens[2].Equals("PANELS", StringComparison.OrdinalIgnoreCase);
+            bool solar = tokens.Count == 2 &&
+                         tokens[1].Equals("SOLAR", StringComparison.OrdinalIgnoreCase);
+            if (!solarPanels && !solar)
+            {
+                errors.Add("Line " + command.Line + ": use DEPLOY SOLAR PANELS;.");
+                return false;
+            }
+            return true;
+        }
+
         private static bool ReadModule(List<string> tokens, ScriptCommand command, List<string> errors)
         {
             if (tokens.Count != 2 || !Modules.Contains(tokens[1]))
@@ -348,7 +867,7 @@ namespace KSPSOS
 
         private static bool ReadBooleanAssignment(List<string> tokens, ScriptCommand command, List<string> errors)
         {
-            if (tokens.Count < 3)
+            if (tokens.Count != 4 || tokens[2] != "=")
             {
                 errors.Add("Line " + command.Line + ": use SET NAME = TRUE or SET NAME = FALSE.");
                 return false;
@@ -364,6 +883,14 @@ namespace KSPSOS
             command.Variable = tokens[1].ToUpperInvariant();
             command.BoolValue = value == "TRUE";
             return true;
+        }
+
+        private static bool RequireTokenCount(List<string> tokens, int expected, ScriptCommand command, List<string> errors, string usage)
+        {
+            if (tokens.Count == expected)
+                return true;
+            errors.Add("Line " + command.Line + ": " + usage);
+            return false;
         }
 
         private static bool ReadCondition(List<string> tokens, int start, ScriptCommand command, List<string> errors)
@@ -413,13 +940,46 @@ namespace KSPSOS
             }
 
             float number;
-            if (!float.TryParse(tokens[start + 2], NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+            string metricName = tokens[start].ToUpperInvariant();
+            if (metricName == "ORBIT")
+            {
+                string orbitState = tokens[start + 2].ToUpperInvariant();
+                if (conditionOperator != ConditionOperator.Equal && conditionOperator != ConditionOperator.NotEqual)
+                {
+                    errors.Add("Line " + command.Line + ": ORBIT accepts only =, ==, or != with SAFE or UNSAFE.");
+                    return false;
+                }
+                if (orbitState != "SAFE" && orbitState != "UNSAFE")
+                {
+                    errors.Add("Line " + command.Line + ": ORBIT state must be SAFE or UNSAFE.");
+                    return false;
+                }
+
+                command.Condition = new Condition
+                {
+                    IsOrbitState = true,
+                    OrbitSafe = orbitState == "SAFE",
+                    Operator = conditionOperator,
+                    Negated = conditionOperator == ConditionOperator.NotEqual
+                };
+                return true;
+            }
+            bool distanceMetric = metricName == "ALTITUDE" || metricName == "APOAPSIS" || metricName == "PERIAPSIS";
+            if (distanceMetric)
+            {
+                if (!TryParseDistance(tokens[start + 2], out number))
+                {
+                    errors.Add("Line " + command.Line + ": condition value must be numeric or use a distance such as 100KM.");
+                    return false;
+                }
+            }
+            else if (!float.TryParse(tokens[start + 2], NumberStyles.Float, CultureInfo.InvariantCulture, out number))
             {
                 errors.Add("Line " + command.Line + ": condition value must be numeric.");
                 return false;
             }
 
-            if (!Metrics.Contains(tokens[start]))
+            if (!Metrics.Contains(metricName))
             {
                 errors.Add("Line " + command.Line + ": unknown telemetry name '" + tokens[start] + "'.");
                 return false;
@@ -427,7 +987,7 @@ namespace KSPSOS
 
             command.Condition = new Condition
             {
-                Name = tokens[start].ToUpperInvariant(),
+                Name = metricName,
                 Operator = conditionOperator,
                 Number = number,
                 Negated = negated

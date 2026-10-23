@@ -22,7 +22,7 @@ STAGE;
 CIRC;
 ```
 
-> **Project status:** KSP-sOS is an early-alpha prototype. The terminal, parser, staging, attitude control, RCS toggles, conditions, telemetry waits, and approximate circularization are implemented. Test flight programs with a recoverable save.
+> **Project status:** KSP-sOS is an early-alpha prototype. The terminal, parser, staging, attitude control, RCS toggles, conditions, telemetry waits, gravity-turn profiles, approximate transfers, and assisted rendezvous/docking controls are implemented. Test flight programs with a recoverable save.
 
 KSP-sOS is an independent community project and is not affiliated with Squad or Private Division.
 
@@ -109,6 +109,27 @@ LAUNCH;
 
 Indentation is optional. It is only used to make blocks easier to read.
 
+Control-flow blocks also support C#-style curly braces. Braces are optional for the older `END;` form, but recommended for new scripts:
+
+```text
+IF FUEL < 10 {
+    PRINT low fuel;
+    ABORT;
+} ELSE {
+    PRINT fuel is okay;
+}
+
+WHEN ALTITUDE > 10000 {
+    STAGE;
+}
+```
+
+Compact blocks are also accepted when every command still has its semicolon:
+
+```text
+IF ORBIT = SAFE { DEPLOY SOLAR PANELS; };
+```
+
 ## Module directives
 
 Optional behavior modules are enabled at the top of a program with `using` statements. They must appear before the first flight command:
@@ -125,15 +146,15 @@ Supported module names are:
 | Directive | Status |
 | --- | --- |
 | `using autostage;` | Active: stages when the current stage's detected fuel resources are depleted. |
-| `using clearskies;` | Registered switch; debris-management automation is planned. |
-| `using autowarp;` | Registered switch; safe time-warp automation is planned. |
-| `using maxscience;` | Registered switch; automatic science planning is planned. `science` is accepted as an alias. |
-| `using safeabort;` | Registered switch; automatic safety-abort policy is planned. |
-| `using smartrcs;` | Registered switch for the future rendezvous/docking controller. |
-| `using autoland;` | Registered switch; automatic landing is planned. |
-| `using rendezvous;` | Registered switch; rendezvous guidance is planned. |
-| `using docking;` | Registered switch; docking guidance is planned. |
-| `using recovery;` | Registered switch; recovery automation is planned. |
+| `using clearskies;` | Active: removes unmanned debris on the current celestial body once it is more than 1km from the active vessel. Use only if you want automatic debris deletion. |
+| `using autowarp;` | Active for transfer planning: warps to 30 seconds before a calculated transfer window. |
+| `using maxscience;` | Enables stock-experiment collection plus automatic antenna transmission when available. `science` is accepted as an alias. |
+| `using safeabort;` | Active: monitors a depleted active liquid-fuel stage during powered flight and triggers the abort action group. Explicit `ABORT;` is active now. |
+| `using smartrcs;` | Enables RCS assistance used by rendezvous and docking. |
+| `using autoland;` | Enables the assisted landing controller used by `LAND ON`. |
+| `using rendezvous;` | Enables the rendezvous controller. |
+| `using docking;` | Enables docking-port selection and final-approach control. |
+| `using recovery;` | Enables the recovery wait; `RECOVER;` pauses until the vessel is landed or splashed. |
 
 Unknown modules and `using` statements placed after flight commands produce parser errors instead of being silently ignored.
 
@@ -150,6 +171,30 @@ Starts a simple launch sequence:
 ```text
 LAUNCH;
 ```
+
+### `LAUNCH TO DOCK TO <vessel>;`
+
+Launches, selects a named vessel as the target, automatically enters the current body's gravity-turn profile, and queues an orbital-plane correction burn when the target orbit is available before continuing with the rendezvous/docking sequence. Use `DISTANCE` and `DOCK TO TARGET` or `AUTODOCK` on following lines:
+
+```text
+LAUNCH TO DOCK TO Station Alpha;
+DISTANCE 50;
+AUTODOCK;
+```
+
+The target vessel must already exist in the current game and be loaded/targetable. The target inclination is reported in the terminal. Exact atmospheric launch-heading optimization is still vessel- and launch-site-dependent, so check the ascent in a test save.
+
+### `ALIGN PLANE TO TARGET;`
+
+Creates a normal-direction maneuver node at the next suitable ascending-node opportunity to match the selected target vessel's orbital plane:
+
+```text
+LAUNCH TO DOCK TO Station Alpha;
+ALIGN PLANE TO TARGET;
+EXECUTE NODE;
+```
+
+This handles orbital-plane correction after ascent. It does not replace launch-site heading optimization during atmospheric ascent.
 
 ### `STAGE;`
 
@@ -241,9 +286,18 @@ CIRC;
 
 This is an approximate first-generation circularizer, not a full maneuver-node planner.
 
+### `CIRCULARISE <altitude>;`
+
+The British spelling is accepted, and an optional altitude may be supplied in metres or kilometres. The burn stops when periapsis reaches the requested altitude:
+
+```text
+CIRCULARISE 100KM;
+CIRCULARIZE 80000;
+```
+
 ### `GRAVTURN <body>;`
 
-Starts an adaptive gravity-turn ascent using a body-specific profile:
+Starts an adaptive gravity-turn ascent using a body-specific profile. The default target is an equatorial/prograde orbit; after ascent, KSP-sOS creates and executes a plane-correction node when the current orbit is not equatorial:
 
 ```text
 GRAVTURN KERBIN;
@@ -252,9 +306,61 @@ GRAVTURN MUN;
 GRAVTURN MINMUS;
 ```
 
+Use `GRAVTURN POLAR <body>;` to request a polar launch orbit. `GRAVTURN EQUATORIAL <body>;` is an explicit spelling of the default:
+
+```text
+GRAVTURN POLAR KERBIN;
+GRAVTURN EQUATORIAL KERBIN;
+```
+
 Profiles contain tailored starting altitude, pitch-over timing, prograde hand-off speed, throttle behavior, and target apoapsis. Atmospheric bodies such as Kerbin, Duna, Eve, and Laythe use slower pitch programs; low-gravity bodies such as Mun, Minmus, Gilly, Bop, and Pol use shorter pitch-over phases and lower orbital targets.
 
 The selected body must match the vessel's current celestial body. `GRAVTURN MUN;` will stop safely if the vessel is still around Kerbin. The profile is a strong starting point, not a guarantee for every launch vehicle: thrust-to-weight ratio, drag, payload mass, and staging still affect the result.
+
+### `HOHMANN TO <body>;`
+
+Creates an approximate Hohmann-transfer maneuver node to a celestial body:
+
+```text
+HOHMANN TO MUN;
+```
+
+For a moon or other body inside the current parent body's sphere of influence, KSP-sOS calculates a local Hohmann transfer. For an interplanetary target, it calculates an approximate heliocentric departure burn. It samples the source and target orbits to choose the closest phase-window opportunity over one synodic period, then creates a node in the normal KSP maneuver system and reports the estimated phase error.
+
+This command currently **plans the node but does not execute the burn**. Plane changes and detailed launch-window correction are not included, so check the node, inclination, phase angle, and available delta-v in map view before burning.
+
+### `EXECUTE NODE;`
+
+Executes the next maneuver node in the vessel's KSP maneuver list. KSP's maneuver autopilot controls attitude while KSP-sOS estimates burn duration from the vessel's current delta-v and burn-time data, applies a bounded full-throttle burn, and removes the node when the burn completes:
+
+```text
+using autowarp;
+HOHMANN TO DUNA;
+EXECUTE NODE;
+```
+
+This is an assisted burn controller, not a proof of exact delta-v delivery. Test it with a recoverable save and verify the node before committing.
+
+### `TRANSFER TO <body>;` and `TRANSFER TO CB <body>;`
+
+`TRANSFER` is the general mission-planning spelling. Both forms are accepted:
+
+```text
+TRANSFER TO MUN;
+TRANSFER TO CB DUNA;
+```
+
+`CB` makes it explicit that the final word is a celestial-body name. The current implementation creates the same phase-window transfer node as `HOHMANN`; plane alignment remains manual, while `EXECUTE NODE;` can commit the generated node.
+
+`POLAR ORBIT;` creates a plane-change node for the current body's polar plane. `POLAR ORBIT AROUND <body>;` waits for that body after an executed transfer, then creates the polar plane node. In WALK mode it executes the node automatically; outside WALK mode, follow it with `EXECUTE NODE;`. The vessel should already have a stable captured orbit around the destination:
+
+```text
+*WALK IN THE PARK*;
+TRANSFER TO MUN;
+POLAR ORBIT AROUND MUN;
+```
+
+When a transfer node is executed and the next command is `LAND ON <body>;`, KSP-sOS keeps the program alive while the vessel coasts through the transfer. It begins landing guidance only after KSP reports that the vessel has entered the destination body's sphere of influence, then performs a retrograde capture phase when the arrival orbit is hyperbolic before starting descent guidance. If the transfer was only planned and no node was executed, `LAND ON` stops with an actionable error instead of silently waiting forever.
 
 ### `ABORT;`
 
@@ -270,6 +376,62 @@ Writes a message to the terminal output:
 
 ```text
 PRINT Booster stage complete;
+```
+
+### `SCIENCE AUTO;`, `SCIENCE COLLECT;`, `SCIENCE TRANSMIT;`, and `DO SCIENCE;`
+
+`SCIENCE AUTO;` deploys available stock science experiments on the active vessel, waits for data generation, and collects the resulting data. With `using maxscience;`, it also starts every usable stock antenna transmitter after collection. `SCIENCE COLLECT;` only collects experiment data that already exists, while `SCIENCE TRANSMIT;` starts antenna transmission for data already stored on the vessel. `DO SCIENCE;` is an alias for `SCIENCE AUTO;`.
+
+```text
+using maxscience;
+SCIENCE AUTO;
+```
+
+The current routine handles the vessel's present situation. It does not yet plan an entire multi-biome science route, transmit science automatically, or reset every reusable experiment for a future situation.
+
+### Safe-orbit checks and solar panels
+
+`ORBIT = SAFE` is a built-in safety condition. It becomes true only when the vessel has a stable elliptical orbit, its periapsis and apoapsis clear the body's surface and atmosphere, and the vessel is not landed or splashed. `DEPLOY SOLAR PANELS;` commands every stock deployable solar panel on the active vessel to extend. `DEPLOY SOLAR;` is accepted as a short form:
+
+```text
+IF ORBIT = SAFE {
+    DEPLOY SOLAR PANELS;
+}
+```
+
+`ORBIT = UNSAFE` and `ORBIT != SAFE` are also supported. The condition is a conservative flight-safety gate; it does not guarantee sunlight, communication, battery margin, or collision clearance.
+
+## Rendezvous, docking, landing, and mission helpers
+
+These commands are designed to make longer scripts readable:
+
+```text
+DISTANCE 50;
+RENDEZVOUS WITH TARGET;
+DOCK TO TARGET;
+AUTODOCK;
+APOLLO DOCK;
+APOLLO DOCK TO TARGET;
+LAND ON THE MUN;
+RECOVER;
+```
+
+`DISTANCE` sets the approach distance in metres. `RENDEZVOUS WITH TARGET;` uses the currently selected target, or a vessel name may be supplied. `DOCK TO TARGET;` requires a docking port on the target vessel to be selected in KSP. `AUTODOCK;` searches for the nearest compatible docking-port pair. The controller enables RCS, aligns the ports, limits closing speed, changes the active vessel reference to the selected docking port, and calls KSP's docking API when capture conditions are met.
+
+`APOLLO DOCK TO TARGET;` uses the selected target vessel, or `APOLLO DOCK;` searches for the nearest dockable vessel and then performs the transposition approach with automatic RCS, port alignment, rotation, and capture. If no external target is available, it falls back to two compatible separated ports on the active vessel and uses KSP's same-vessel docking path. It does not teleport parts or create a docking port that the craft does not have.
+
+`LAND ON BODY;` performs a retrograde deorbit burn at periapsis when needed, then provides an assisted descent controller. It still expects a lander with suitable thrust, fuel, control authority, and a survivable trajectory; terrain targeting and vehicle-specific tuning are not guaranteed. `RECOVER;` waits until the vessel is landed or splashed before the script continues.
+
+`*WALK IN THE PARK*;` is a readable high-level mission marker. It enables the script's mission-assist profile and can be placed before commands such as `GRAVTURN`, `CIRCULARISE`, `TRANSFER`, and `LAND`.
+
+In WALK mode, transfer commands automatically execute the generated maneuver node before the next script command runs. Outside WALK mode, use `EXECUTE NODE;` when you want the script to commit a planned node explicitly. For example:
+
+```text
+*WALK IN THE PARK*;
+GRAVTURN KERBIN;
+CIRCULARISE 100KM;
+TRANSFER TO MUN;
+LAND ON THE MUN;
 ```
 
 ## Booleans and control flow
@@ -307,6 +469,14 @@ IF LANDING_MODE;
 END;
 ```
 
+The same block can be written with braces:
+
+```text
+IF LANDING_MODE {
+    THROTTLE 20;
+}
+```
+
 Use `NOT` to reverse a boolean condition:
 
 ```text
@@ -325,6 +495,19 @@ PRINT ten kilometres reached;
 ```
 
 Unlike `IF`, `WHEN` waits. This makes it useful for flight milestones.
+
+`WHEN` also supports a block:
+
+```text
+WHEN APOAPSIS > 80000 {
+    THROTTLE 0;
+    PRINT coast to apoapsis;
+}
+```
+
+### Syntax colors and diagnostics
+
+The terminal includes a syntax preview beneath the program editor. Logic is purple, burns and orbit maneuvers are orange, vessel controls are yellow, science is blue, mission/navigation commands are green, general commands are cyan, numbers are yellow, comments are green, and unknown command words are red. Parser errors appear below the preview with their line number, so misspellings are visible before you run the program.
 
 ## Telemetry conditions
 
@@ -427,20 +610,23 @@ The current KSP-sOS version supports:
 - Abort action-group activation.
 - Top-of-script module directives.
 - Basic automatic staging through `using autostage;`.
+- Opt-in debris cleanup through `using clearskies;`.
+- Opt-in transfer-window warping through `using autowarp;`.
+- Opt-in active-stage safety aborts through `using safeabort;`.
+- Stock-experiment execution, collection, and optional antenna transmission through `SCIENCE AUTO;` with `using maxscience;`.
+- Safe-orbit telemetry conditions and stock solar-panel deployment through `ORBIT = SAFE` and `DEPLOY SOLAR PANELS;`.
 - Body-specific adaptive gravity turns through `GRAVTURN <body>;`.
+- Equatorial-by-default ascent and opt-in polar ascent/arrival through `GRAVTURN POLAR <body>;` and `POLAR ORBIT AROUND <body>;`.
+- Approximate local and interplanetary transfer-node planning through `HOHMANN TO <body>;` and `TRANSFER TO <body>;`.
+- Long-mission transfer continuation: after an executed transfer, `LAND ON <body>;` waits for destination sphere-of-influence entry before starting descent guidance.
+- Target-altitude circularization through `CIRCULARISE 100KM;`.
+- Target-vessel selection and assisted rendezvous through `LAUNCH TO DOCK TO`, `DISTANCE`, and `RENDEZVOUS`.
+- Orbital-plane correction nodes through `ALIGN PLANE TO TARGET;`.
+- Compatible-port selection and final-approach control through `DOCK TO TARGET`, `AUTODOCK`, and `APOLLO DOCK`.
+- Assisted descent and landed-state recovery checks through `LAND ON` and `RECOVER`.
+- Mission-assist profile activation through `*WALK IN THE PARK*;`.
 
-The following are planned extensions rather than current commands:
-
-```text
-CIRCULARISE 100KM;
-TRANSFER TO MUN;
-RENDEZVOUS WITH TARGET;
-AUTODOCK;
-SCIENCE AUTO;
-LAND ON MUN;
-```
-
-Do not put those commands in a script yet; the current parser will report them as unknown commands.
+Transfer nodes remain approximate. `EXECUTE NODE;` can commit the next node, but verify phase angle, inclination, node direction, and available delta-v in map view before committing to a long interplanetary burn.
 
 ## Troubleshooting
 
@@ -459,7 +645,7 @@ Check that:
 - The command name is supported.
 - `HOLD` has a valid duration.
 - A telemetry condition uses a supported name and comparison operator.
-- Every `IF` has a matching `END`.
+- Every `IF`, `ELSE`, and `WHEN` block has a matching `}`; legacy `IF` blocks use `END;`.
 - Every `using` directive appears before the first flight command.
 
 ### The program is not responding
@@ -469,6 +655,20 @@ Check that:
 ## Build from source
 
 The repository includes the source, project file, and a prebuilt drag-and-drop package. To build a fresh DLL, compile against the KSP assemblies from your local installation. KSP's own assemblies should remain in the game installation and should not be copied into `GameData`.
+
+### Validation status
+
+- The source compiles against the installed KSP 1.12.5 assemblies.
+- Parser smoke tests cover semicolon enforcement, braces, distance units, science modes, mission commands, and malformed-argument diagnostics.
+- The drag-and-drop archive contains only `GameData/KSPsOS` and passes ZIP integrity testing.
+- A complete live KSP flight has not been automated in this repository, so ascent, transfer, landing, science-transmission, and docking controllers remain early-alpha and should be tested in a throwaway save.
+
+Run the parser smoke test with Mono:
+
+```bash
+mcs -out:/tmp/kspsos-parser-smoke.exe src/CommandParser.cs tests/ParserSmoke.cs
+mono /tmp/kspsos-parser-smoke.exe
+```
 
 On macOS, for example:
 
@@ -503,3 +703,4 @@ KSP-sOS is released under the [MIT License](LICENSE).
 | `src/KSPsOSAddon.cs` | Creates the in-game terminal and connects flight controls. |
 | `GameData/KSPsOS/KSPsOS.version` | KSP-AVC version metadata. |
 | `GameData/KSPsOS/Plugins/KSPsOS.dll` | Compiled plugin used by KSP. |
+| `tests/ParserSmoke.cs` | Parser and diagnostic smoke test used during development. |
