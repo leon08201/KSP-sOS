@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
@@ -17,6 +18,12 @@ namespace KSPSOS
         private string terminalInput = string.Empty;
         private bool visible;
         private bool focusTerminalOnOpen;
+        private bool focusProgramEditor;
+        private string scriptsDirectory;
+        private string currentScriptPath;
+        private string scriptStorageStatus = "Not saved yet";
+        private float scriptSaveDueTime = -1f;
+        private int reuseIndex = -1;
         private GUIStyle wrappedLabel;
         private GUIStyle richLabel;
         private GUIStyle errorLabel;
@@ -28,6 +35,8 @@ namespace KSPSOS
         private void Awake()
         {
             runtime.SetVessel(FlightGlobals.ActiveVessel);
+            scriptsDirectory = Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "KSPsOS", "PluginData", "Scripts");
+            EnsureScriptDirectory();
         }
 
         private void Update()
@@ -49,12 +58,18 @@ namespace KSPSOS
             }
             runtime.SetVessel(activeVessel);
             runtime.Tick(Time.deltaTime);
+            if (scriptSaveDueTime >= 0f && Time.time >= scriptSaveDueTime)
+            {
+                SaveCurrentScript();
+                scriptSaveDueTime = -1f;
+            }
         }
 
         private void OnDestroy()
         {
             if (subscribedVessel != null)
                 subscribedVessel.OnFlyByWire -= OnFlyByWire;
+            SaveCurrentScript();
             runtime.Stop("Stopped.");
         }
 
@@ -120,12 +135,21 @@ namespace KSPSOS
             GUILayout.EndHorizontal();
 
             GUILayout.Label("Program", GUI.skin.box);
+            GUILayout.Label("Script file: " + scriptStorageStatus, wrappedLabel);
             editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(190f));
             GUI.SetNextControlName("KSPsOSProgramEditor");
             string previousScript = script;
             string editedScript = GUILayout.TextArea(script, GUILayout.ExpandHeight(true));
             if (!string.Equals(previousScript, editedScript, StringComparison.Ordinal))
+            {
                 script = ApplyEditorAutoIndent(previousScript, editedScript);
+                QueueScriptSave();
+            }
+            if (focusProgramEditor && Event.current.type == EventType.Repaint)
+            {
+                GUI.FocusControl("KSPsOSProgramEditor");
+                focusProgramEditor = false;
+            }
             GUILayout.EndScrollView();
 
             GUILayout.Label("Syntax preview", GUI.skin.box);
@@ -143,7 +167,10 @@ namespace KSPSOS
 
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("RUN PROGRAM", GUILayout.Height(30f)))
+            {
+                SaveCurrentScript();
                 runtime.Run(script);
+            }
             if (GUILayout.Button("STOP", GUILayout.Height(30f)))
                 runtime.Stop("Stopped by user.");
             if (GUILayout.Button("CLEAR LOG", GUILayout.Height(30f)))
@@ -161,6 +188,13 @@ namespace KSPSOS
             GUILayout.Label("Commands: LAUNCH, STAGE, HOLD, CIRC, THROTTLE, SAS, ABORT, IF, WHEN, SET", wrappedLabel);
             GUILayout.EndHorizontal();
 
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("WRITE NEW SCRIPT", GUILayout.Height(28f)))
+                WriteNewScript();
+            if (GUILayout.Button("REUSE SCRIPT", GUILayout.Height(28f)))
+                ReuseScript();
+            GUILayout.EndHorizontal();
+
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 25f));
         }
 
@@ -172,6 +206,130 @@ namespace KSPSOS
 
             runtime.RunInteractiveLine(line);
             terminalInput = string.Empty;
+        }
+
+        private void EnsureScriptDirectory()
+        {
+            if (string.IsNullOrEmpty(scriptsDirectory))
+                return;
+            try
+            {
+                Directory.CreateDirectory(scriptsDirectory);
+            }
+            catch (Exception exception)
+            {
+                scriptStorageStatus = "Storage unavailable: " + exception.Message;
+            }
+        }
+
+        private void QueueScriptSave()
+        {
+            EnsureScriptDirectory();
+            if (string.IsNullOrEmpty(currentScriptPath))
+                currentScriptPath = CreateScriptPath();
+            scriptStorageStatus = Path.GetFileName(currentScriptPath) + " (saving...)";
+            scriptSaveDueTime = Time.time + 0.5f;
+        }
+
+        private void SaveCurrentScript()
+        {
+            if (string.IsNullOrEmpty(script) && string.IsNullOrEmpty(currentScriptPath))
+                return;
+            EnsureScriptDirectory();
+            if (string.IsNullOrEmpty(currentScriptPath))
+                currentScriptPath = CreateScriptPath();
+            if (string.IsNullOrEmpty(currentScriptPath))
+                return;
+
+            try
+            {
+                File.WriteAllText(currentScriptPath, script ?? string.Empty);
+                scriptStorageStatus = Path.GetFileName(currentScriptPath);
+            }
+            catch (Exception exception)
+            {
+                scriptStorageStatus = "Save failed: " + exception.Message;
+            }
+        }
+
+        private string CreateScriptPath()
+        {
+            if (string.IsNullOrEmpty(scriptsDirectory))
+                return null;
+
+            string baseName = "Script_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string path = Path.Combine(scriptsDirectory, baseName + ".kspsos");
+            int suffix = 1;
+            while (File.Exists(path))
+            {
+                path = Path.Combine(scriptsDirectory, baseName + "_" + suffix + ".kspsos");
+                suffix++;
+            }
+            return path;
+        }
+
+        private string[] SavedScripts()
+        {
+            EnsureScriptDirectory();
+            if (string.IsNullOrEmpty(scriptsDirectory))
+                return new string[0];
+            try
+            {
+                string[] files = Directory.GetFiles(scriptsDirectory, "*.kspsos");
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+                return files;
+            }
+            catch (Exception exception)
+            {
+                scriptStorageStatus = "Library unavailable: " + exception.Message;
+                return new string[0];
+            }
+        }
+
+        private void WriteNewScript()
+        {
+            SaveCurrentScript();
+            currentScriptPath = CreateScriptPath();
+            script = string.Empty;
+            reuseIndex = -1;
+            scriptStorageStatus = string.IsNullOrEmpty(currentScriptPath)
+                ? "New script (not saved)"
+                : Path.GetFileName(currentScriptPath);
+            focusProgramEditor = true;
+            SaveCurrentScript();
+        }
+
+        private void ReuseScript()
+        {
+            SaveCurrentScript();
+            string[] files = SavedScripts();
+            if (files.Length == 0)
+            {
+                scriptStorageStatus = "No saved scripts found";
+                return;
+            }
+
+            if (reuseIndex < 0 || reuseIndex >= files.Length)
+            {
+                int currentIndex = Array.IndexOf(files, currentScriptPath);
+                reuseIndex = currentIndex >= 0
+                    ? (currentIndex - 1 + files.Length) % files.Length
+                    : files.Length - 1;
+            }
+            else
+                reuseIndex = (reuseIndex - 1 + files.Length) % files.Length;
+
+            try
+            {
+                currentScriptPath = files[reuseIndex];
+                script = File.ReadAllText(currentScriptPath);
+                scriptStorageStatus = Path.GetFileName(currentScriptPath);
+                focusProgramEditor = true;
+            }
+            catch (Exception exception)
+            {
+                scriptStorageStatus = "Load failed: " + exception.Message;
+            }
         }
 
         private static string HighlightLine(string sourceLine)

@@ -88,6 +88,21 @@ This area shows status messages, parser errors, staging, circularization, module
 
 Press **F8** again to hide the terminal.
 
+### Script library
+
+The bottom of the terminal has two script-library controls:
+
+- **WRITE NEW SCRIPT** clears the program editor and starts a new saved `.kspsos` file.
+- **REUSE SCRIPT** loads saved scripts from the library; press it again to cycle through older files.
+
+Scripts are auto-saved while you edit and are stored at:
+
+```text
+GameData/KSPsOS/PluginData/Scripts/
+```
+
+The folder is created the first time KSP-sOS runs. The prebuilt ZIP does not contain personal scripts; they are created in your local KSP installation.
+
 ## Basic syntax rules
 
 Every command must end with a semicolon:
