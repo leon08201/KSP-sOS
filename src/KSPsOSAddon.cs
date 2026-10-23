@@ -20,6 +20,7 @@ namespace KSPSOS
         private GUIStyle richLabel;
         private GUIStyle errorLabel;
         private Vessel subscribedVessel;
+        private const string EditorIndent = "    ";
 
         private const string DefaultScript = "# KSP-sOS example\nLAUNCH;\nHOLD PG 10;\nSTAGE;\nHOLD 5;\nCIRC;";
 
@@ -111,7 +112,10 @@ namespace KSPSOS
 
             GUILayout.Label("Program", GUI.skin.box);
             editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(190f));
-            script = GUILayout.TextArea(script, GUILayout.ExpandHeight(true));
+            string previousScript = script;
+            string editedScript = GUILayout.TextArea(script, GUILayout.ExpandHeight(true));
+            if (!string.Equals(previousScript, editedScript, StringComparison.Ordinal))
+                script = ApplyEditorAutoIndent(previousScript, editedScript);
             GUILayout.EndScrollView();
 
             GUILayout.Label("Syntax preview", GUI.skin.box);
@@ -286,6 +290,53 @@ namespace KSPSOS
         private static string EscapeRichText(string text)
         {
             return text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+        }
+
+        private static string ApplyEditorAutoIndent(string previous, string edited)
+        {
+            if (string.IsNullOrEmpty(edited) || edited.Length != previous.Length + 1)
+                return edited;
+
+            if (edited.EndsWith("\n", StringComparison.Ordinal))
+            {
+                int newline = edited.Length - 1;
+                int lineStart = 0;
+                if (newline > 0)
+                {
+                    int priorNewline = edited.LastIndexOf('\n', newline - 1);
+                    lineStart = priorNewline < 0 ? 0 : priorNewline + 1;
+                }
+                string completedLine = edited.Substring(lineStart, newline - lineStart);
+                string indentation = LeadingWhitespace(completedLine);
+                if (completedLine.TrimEnd().EndsWith("{", StringComparison.Ordinal))
+                    indentation += EditorIndent;
+                return edited + indentation;
+            }
+
+            if (edited.EndsWith("}", StringComparison.Ordinal))
+            {
+                int lineStart = edited.LastIndexOf('\n');
+                lineStart = lineStart < 0 ? 0 : lineStart + 1;
+                string currentLine = edited.Substring(lineStart);
+                string indentation = LeadingWhitespace(currentLine);
+                if (currentLine.TrimStart().StartsWith("}", StringComparison.Ordinal) && indentation.Length > 0)
+                {
+                    int remove = indentation.EndsWith("\t", StringComparison.Ordinal)
+                        ? 1
+                        : Math.Min(EditorIndent.Length, indentation.Length);
+                    return edited.Substring(0, lineStart) + indentation.Substring(0, indentation.Length - remove) + currentLine.Substring(indentation.Length);
+                }
+            }
+
+            return edited;
+        }
+
+        private static string LeadingWhitespace(string text)
+        {
+            int count = 0;
+            while (count < text.Length && (text[count] == ' ' || text[count] == '\t'))
+                count++;
+            return text.Substring(0, count);
         }
     }
 }

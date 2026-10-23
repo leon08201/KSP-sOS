@@ -109,6 +109,8 @@ LAUNCH;
 
 Indentation is optional. It is only used to make blocks easier to read.
 
+The in-game program editor adds four spaces automatically when you press Enter after an opening `{`, and removes one indentation level when you type a closing `}` at the end of the current line. This is editor convenience only; the parser does not require indentation.
+
 Control-flow blocks also support C#-style curly braces. Braces are optional for the older `END;` form, but recommended for new scripts:
 
 ```text
