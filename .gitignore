@@ -1,0 +1,6 @@
+bin/
+obj/
+GameData/KSPsOS/Plugins/*.dll
+.DS_Store
+*.user
+*.suo
