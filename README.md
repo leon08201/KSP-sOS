@@ -696,7 +696,7 @@ Check that:
 
 ## Build from source
 
-The repository includes the source, project file, a prebuilt drag-and-drop package, and a ready-to-copy installation folder. To build a fresh DLL, compile against the KSP assemblies from your local installation. KSP's own assemblies should remain in the game installation and should not be copied into `GameData`.
+The repository includes the source, project file, a prebuilt drag-and-drop package, and a ready-to-copy installation folder. The distributed plugin is a managed DLL built for KSP 1.12.5 and is portable across Windows, macOS, and Linux. KSP's own assemblies should remain in the game installation and should not be copied into `GameData`.
 
 ### Validation status
 
@@ -712,7 +712,15 @@ mcs -out:/tmp/kspsos-parser-smoke.exe src/CommandParser.cs tests/ParserSmoke.cs
 mono /tmp/kspsos-parser-smoke.exe
 ```
 
-On macOS, for example:
+The simplest build method on macOS or Linux is:
+
+```bash
+./build.sh
+```
+
+The script finds a standard Steam installation automatically. If KSP is installed elsewhere, set `KSP_MANAGED` to KSP 1.12.5's `KSP_x64_Data/Managed` directory first. The script uses the local KSP assemblies only as compile-time references and writes the portable plugin to `GameData/KSPsOS/Plugins/KSPsOS.dll`.
+
+On macOS, the equivalent manual command is:
 
 ```bash
 KSP_MANAGED="/path/to/Kerbal Space Program/KSP.app/Contents/Resources/Data/Managed"
@@ -730,7 +738,7 @@ mcs -target:library \
   src/*.cs
 ```
 
-On Windows, set `KspInstall` to your KSP installation directory and build `KSPsOS.csproj` with an MSBuild-compatible .NET SDK. The project copies the output to `GameData/KSPsOS/Plugins`.
+On Windows, set `KSP_MANAGED` or `KspInstall` to your KSP 1.12.5 installation and build with an MSBuild-compatible .NET SDK or Mono. The output belongs at `GameData/KSPsOS/Plugins/KSPsOS.dll`. Distribute only the `GameData/KSPsOS` folder; do not distribute KSP's own assemblies.
 
 ## License
 

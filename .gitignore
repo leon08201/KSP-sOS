@@ -1,6 +1,9 @@
 bin/
 obj/
+# The plugin is a managed KSP assembly and is part of the distributable mod.
+# KSP/Unity reference assemblies remain outside the repository.
 GameData/KSPsOS/Plugins/*.dll
+!GameData/KSPsOS/Plugins/KSPsOS.dll
 .DS_Store
 *.user
 *.suo
