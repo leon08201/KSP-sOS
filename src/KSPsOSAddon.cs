@@ -25,6 +25,7 @@ namespace KSPSOS
         private int programCursor;
         private int lastF8ToggleFrame = -1;
         private bool terminalControlLockActive;
+        private bool terminalStagingLockActive;
         private string scriptsDirectory;
         private string currentScriptPath;
         private string scriptStorageStatus = "Not saved yet";
@@ -41,6 +42,7 @@ namespace KSPSOS
         private Vessel subscribedVessel;
         private const string EditorIndent = "    ";
         private const string TerminalControlLockId = "KSPsOSTerminal";
+        private const string TerminalStagingLockId = "KSPsOSTerminalEditor";
 
         private const string DefaultScript = "# KSP-sOS example\nLAUNCH;\nHOLD PG 10;\nSTAGE;\nHOLD 5;\nCIRC;";
 
@@ -62,10 +64,12 @@ namespace KSPSOS
                 visible = false;
                 programEditorActive = false;
                 SetTerminalControlLock(false);
+                SetTerminalStagingLock(false);
                 return;
             }
 
             SetTerminalControlLock(runtime.RequestsControlLock);
+            SetTerminalStagingLock(visible && programEditorActive);
 
             Vessel activeVessel = FlightGlobals.ActiveVessel;
             if (activeVessel != subscribedVessel)
@@ -91,6 +95,7 @@ namespace KSPSOS
         private void OnDestroy()
         {
             SetTerminalControlLock(false);
+            SetTerminalStagingLock(false);
             if (subscribedVessel != null)
                 subscribedVessel.OnFlyByWire -= OnFlyByWire;
             runtime.Stop("Stopped.");
@@ -148,6 +153,8 @@ namespace KSPSOS
                 Event.current.Use();
                 return;
             }
+
+            SetTerminalStagingLock(programEditorActive);
 
             // Process editor keys before GUI.Window can route them to another IMGUI control.
             HandleProgramKeyboard();
@@ -207,12 +214,41 @@ namespace KSPSOS
             terminalControlLockActive = locked;
         }
 
+        // KSP handles staging outside IMGUI, so Event.Use() does not prevent
+        // a space typed in the editor from also activating the next stage.
+        // Lock only staging while the editor has focus; flight and camera input
+        // remain available.
+        private void SetTerminalStagingLock(bool locked)
+        {
+            if (locked == terminalStagingLockActive)
+                return;
+
+            if (locked)
+                InputLockManager.SetControlLock(ControlTypes.STAGING, TerminalStagingLockId);
+            else
+                InputLockManager.RemoveControlLock(TerminalStagingLockId);
+
+            terminalStagingLockActive = locked;
+        }
+
         private void DrawWindow(int id)
         {
             GUILayout.Label("KSP-sOS", titleStyle);
             GUILayout.Label("Write one mission here, save it explicitly, then run it. F8 hides it; right-click toggles compact mode.", hintStyle);
 
-            GUILayout.Label("Mission script", sectionStyle);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Mission script", sectionStyle, GUILayout.ExpandWidth(true));
+            string focusButton = programEditorActive ? "EDITOR FOCUS: ON" : "FOCUS EDITOR";
+            if (GUILayout.Button(focusButton, compactButtonStyle, GUILayout.Height(24f), GUILayout.Width(140f)))
+            {
+                programEditorActive = !programEditorActive;
+                focusProgramEditor = programEditorActive;
+                SetTerminalStagingLock(programEditorActive);
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(programEditorActive
+                ? "Editor focus is on: Space types normally and cannot stage the vessel."
+                : "Editor focus is off: vessel staging controls pass through.", hintStyle);
             GUILayout.Label("Script file: " + scriptStorageStatus, wrappedLabel);
             editorScroll = GUILayout.BeginScrollView(editorScroll, GUILayout.Height(compactTerminal ? 150f : 190f));
             if (focusProgramEditor)
