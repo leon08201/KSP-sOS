@@ -72,7 +72,9 @@ The active vessel must be controllable. KSP-sOS does not include or replace KSP'
 
 ## Using the in-game terminal
 
-The terminal has one main mission-script editor. Click the editor, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line, or **SAVE SCRIPT** to save it explicitly. Editing is never saved automatically.
+The terminal has one main mission-script editor. Click the editor, or press **FOCUS EDITOR**, then type or paste a complete multi-line flight program there. Press **RUN PROGRAM** to run it from the first line, or **SAVE SCRIPT** to save it explicitly. Editing is never saved automatically.
+
+When **EDITOR FOCUS: ON** is shown, keyboard input belongs to the editor and the staging action is locked. You can safely type spaces without activating the next vessel stage. Click the button again, press **Esc**, or click outside the editor to return staging input to KSP.
 
 ```text
 LAUNCH;
@@ -695,7 +697,7 @@ The scripting engine is still an early alpha. A successful build and parser test
 ### I cannot type in the terminal
 
 - Open the terminal with **F8** in a Flight scene.
-- Click inside the main mission-script editor, then type or paste the complete program.
+- Click **FOCUS EDITOR** (or click inside the main mission-script editor), then type or paste the complete program. Confirm **EDITOR FOCUS: ON** is displayed before typing spaces.
 - Review parser diagnostics below the syntax preview before pressing **RUN PROGRAM**.
 - If the editor is not responding, press **F8** to close and reopen the terminal.
 - Check `KSP.log` for plugin-loading errors if the terminal does not appear.
